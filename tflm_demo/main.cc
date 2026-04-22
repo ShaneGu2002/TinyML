@@ -62,5 +62,9 @@ int main(int argc, char** argv) {
               output_index, output[output_index]);
   MicroPrintf("Predicted label: %s (index=%d, score=%d)",
               runner.GetTopCategoryLabel(), output_index, output[output_index]);
+  MicroPrintf("FOOTPRINT arena_used=%u arena_reserved=%u input_bytes=%d output_bytes=%d",
+              static_cast<unsigned>(runner.GetArenaUsedBytes()),
+              static_cast<unsigned>(runner.GetArenaSize()),
+              runner.GetInputBytes(), runner.GetOutputBytes());
   return 0;
 }

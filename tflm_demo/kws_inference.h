@@ -1,6 +1,7 @@
 #ifndef FINAL_PROJECT_TFLM_DEMO_KWS_INFERENCE_H_
 #define FINAL_PROJECT_TFLM_DEMO_KWS_INFERENCE_H_
 
+#include <cstddef>
 #include <cstdint>
 
 #include "tensorflow/lite/c/common.h"
@@ -28,6 +29,10 @@ class KeywordSpottingRunner {
   int GetOutputBytes() const;
   int GetTopCategory() const;
   const char* GetTopCategoryLabel() const;
+
+  size_t GetArenaSize() const;
+  size_t GetArenaUsedBytes() const;
+  int GetInputBytes() const;
 
  private:
   struct Impl;

@@ -74,6 +74,10 @@ TfLiteStatus KeywordSpottingRunner::Init() {
     return kTfLiteError;
   }
 
+  MicroPrintf("ARENA used=%u / reserved=%u bytes",
+              static_cast<unsigned>(impl_->interpreter->arena_used_bytes()),
+              static_cast<unsigned>(kTensorArenaSize));
+
   impl_->input = impl_->interpreter->input(0);
   impl_->output = impl_->interpreter->output(0);
 
@@ -124,6 +128,20 @@ int KeywordSpottingRunner::GetTopCategory() const {
 
 const char* KeywordSpottingRunner::GetTopCategoryLabel() const {
   return kCategoryLabels[GetTopCategory()];
+}
+
+size_t KeywordSpottingRunner::GetArenaSize() const {
+  return static_cast<size_t>(kTensorArenaSize);
+}
+
+size_t KeywordSpottingRunner::GetArenaUsedBytes() const {
+  return impl_->interpreter == nullptr
+             ? 0
+             : impl_->interpreter->arena_used_bytes();
+}
+
+int KeywordSpottingRunner::GetInputBytes() const {
+  return impl_->input == nullptr ? 0 : impl_->input->bytes;
 }
 
 }  // namespace kws

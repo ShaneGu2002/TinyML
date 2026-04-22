@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-# Machine-Learning-Systems
-15642:Machine Learning Systems
-=======
 # Keyword Spotting on RISC-V with TensorFlow Lite Micro
 
 Course final project for CMU 15-642. This repository studies keyword spotting (KWS) model training, INT8 quantization, TensorFlow Lite Micro deployment, and inference evaluation on a RISC-V software stack using Spike.
@@ -110,6 +106,7 @@ The project pipeline is:
 ### `tools/`
 
 - `tools/setup_third_party.sh`: clones local copies of TFLM, `riscv-isa-sim`, and `riscv-pk` into `third_party/`.
+- `tools/size_report.sh`: summarizes the deployment footprint (model size, ELF Flash/RAM usage, tensor-arena peak). See [Footprint & Size Report](#footprint--size-report).
 
 ### Generated or local-only paths
 
@@ -266,6 +263,53 @@ make print-tools
 make check-tools
 ```
 
+## Footprint & Size Report
+
+For an edge / TinyML deployment the interesting numbers are not a single "binary size" but four separate figures: the model, the code in Flash, the RAM working set, and the peak tensor-arena use at runtime. The helper script `tools/size_report.sh` prints all of them in one go.
+
+Static-only report (no simulator run):
+
+```bash
+make                         # ensure build/kws_demo.elf is up to date
+./tools/size_report.sh
+```
+
+Static + runtime report (runs the ELF under Spike and captures the actual peak arena):
+
+```bash
+RUN_SPIKE=1 ./tools/size_report.sh
+```
+
+Example output (DS-CNN INT8 build):
+
+```
+-- Model --
+  int8 tflite:                  41160 B   (40.2 KB)
+
+-- ELF sections --
+  .text    (code, Flash)       139070 B
+  .rodata  (const, Flash)       28624 B
+  .data    (init RW, F->R)      44064 B
+  .bss     (zero RW, RAM)      104440 B
+
+-- Deployment footprint --
+  Flash = text+rodata+data+sdata:   212214 B  (207.2 KB)
+  RAM   = data+sdata+bss+sbss:      149080 B  (145.6 KB)
+
+-- Runtime (spike) --
+ARENA used=23872 / reserved=102400 bytes
+FOOTPRINT arena_used=23872 arena_reserved=102400 input_bytes=490 output_bytes=6
+```
+
+What the numbers mean:
+
+- **Model (`.tflite`)**: the raw int8 model file; this is what ships as a C array via `artifacts/ds_cnn/model_data.cc`.
+- **Flash** (`.text + .rodata + .data + .sdata`): what you must fit in non-volatile storage on the target.
+- **RAM** (`.data + .sdata + .bss + .sbss`): what the target must provide as writable memory, including the static tensor arena.
+- **Arena used / reserved**: how much of the compile-time arena (`kTensorArenaSize` in [tflm_demo/kws_inference.cc](tflm_demo/kws_inference.cc)) TFLM actually needed after `AllocateTensors()`. The arena is allocated in `.bss`, so shrinking it reduces the RAM number 1:1. The `ARENA used=...` line is printed at startup; the `FOOTPRINT ...` line is printed after inference by [tflm_demo/main.cc](tflm_demo/main.cc).
+
+Environment overrides for the script: `ELF`, `TFLITE`, `SIZE_TOOL` (default `riscv64-unknown-elf-size`), `PK`, `RUN_SPIKE`.
+
 ## Evaluate on Spike
 
 Run Speech Commands test-set evaluation through Spike:
@@ -333,4 +377,3 @@ git push -u origin main
 - `.venv/`, dataset files, model files, and build outputs are intentionally excluded from version control.
 - `third_party/` and `tools/riscv/` are also excluded because they are large local dependencies.
 - Some paths in the build flow are currently macOS/Homebrew-oriented and may need adjustment on another machine.
->>>>>>> 17855b2 (Initial commit)

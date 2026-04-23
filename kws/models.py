@@ -1,4 +1,4 @@
-from typing import Iterable, Optional, Tuple
+from typing import Optional, Tuple
 
 import tensorflow as tf
 
@@ -86,24 +86,41 @@ def build_cnn_one_fstride4(
 def build_ds_cnn(
     input_shape: Tuple[int, int, int],
     num_classes: int,
-    ds_filters: Iterable[int] = (64, 64, 64, 64),
+    layers: int = 5,
+    filters: int = 64,
+    kernel: Tuple[int, int] = (3, 3),
+    first_stride: Tuple[int, int] = (2, 2),
+    dropout: float = 0.15,
 ) -> tf.keras.Model:
+    """Hello Edge style DS-CNN.
+
+    `layers` is the total number of conv layers: 1 regular conv stem (with
+    `first_stride`) plus `layers - 1` depthwise-separable conv blocks. All
+    conv layers share the same `kernel` and `filters`.
+    """
+    if layers < 1:
+        raise ValueError(f"layers must be >= 1, got {layers}")
     inputs = tf.keras.Input(shape=input_shape, name="mfcc")
-    x = conv_block(inputs, 64, (3, 3), strides=(2, 2), name="stem")
-    for index, filters in enumerate(ds_filters, start=1):
-        x = ds_conv_block(x, filters, dropout=0.15, name=f"ds_block{index}")
+    x = conv_block(inputs, filters, kernel, strides=first_stride, name="stem")
+    for index in range(1, layers):
+        x = ds_conv_block(x, filters, kernel_size=kernel, dropout=dropout, name=f"ds_block{index}")
     x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
     outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="classifier")(x)
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="ds_cnn")
 
 
-def build_model(model_name: str, input_shape: Tuple[int, int, int], num_classes: int) -> tf.keras.Model:
+def build_model(
+    model_name: str,
+    input_shape: Tuple[int, int, int],
+    num_classes: int,
+    **kwargs,
+) -> tf.keras.Model:
     if model_name == "cnn_trad_fpool3":
         return build_cnn_trad_fpool3(input_shape=input_shape, num_classes=num_classes)
     if model_name == "cnn_one_fstride4":
         return build_cnn_one_fstride4(input_shape=input_shape, num_classes=num_classes)
     if model_name == "ds_cnn":
-        return build_ds_cnn(input_shape=input_shape, num_classes=num_classes)
+        return build_ds_cnn(input_shape=input_shape, num_classes=num_classes, **kwargs)
     raise ValueError(f"Unsupported model_name: {model_name}")
 
 

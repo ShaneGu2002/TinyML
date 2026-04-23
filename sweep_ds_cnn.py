@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-test-samples", type=int, default=None)
     parser.add_argument("--tiers", nargs="+", choices=list(BUDGETS), default=list(BUDGETS),
                         help="Restrict the sweep to a subset of tiers.")
+    parser.add_argument("--no-noise-aug", action="store_true",
+                        help="Disable background-noise augmentation. Removes the per-batch "
+                             "wav read from the data pipeline -> 3-5x faster epochs. "
+                             "Recommended for the sweep itself; re-enable when retraining the "
+                             "final S/M/L model for production accuracy.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Only sample + analytically score candidates, skip training.")
     return parser.parse_args()
@@ -189,6 +194,7 @@ def get_datasets(args: argparse.Namespace, mfcc_bins: int):
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
         max_test_samples=args.max_test_samples,
+        background_noise_prob=0.0 if args.no_noise_aug else 0.8,
     )
     datasets, splits, input_shape = build_datasets(config)
     _DATASETS_CACHE[mfcc_bins] = (datasets, splits, input_shape, config)

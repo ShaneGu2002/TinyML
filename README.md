@@ -65,14 +65,22 @@ The project pipeline is:
 4. Build a RISC-V ELF that runs inference with TFLM.
 5. Evaluate predictions through Spike on Speech Commands test samples.
 
+Following the *Hello Edge* methodology, two model-side tasks are wired up:
+
+- **Task 1 — Baseline DS-CNN** at the standard 49×40 MFCC features (40 MFCC bins from a 40 ms / 20 ms STFT window). One model, reports accuracy / memory / ops. Entry point: `train_kws.py`.
+- **Task 2 — Hyperparameter sweep** to find the best DS-CNN per memory/ops budget tier (S/M/L). Two-stage Plan-C: random sample + analytic budget filter, train survivors briefly, then fully retrain the top-K. Entry point: `sweep_ds_cnn.py`.
+
 ## Repository Layout
 
-- `train_kws.py`: train baseline CNN or DS-CNN models.
+- `train_kws.py`: train a single CNN or DS-CNN model (Task 1, plus optional retrain of a sweep winner).
+- `sweep_ds_cnn.py`: two-stage hyperparameter sweep that finds best DS-CNN models per S/M/L budget (Task 2).
 - `export_int8_mfcc.py`: convert a WAV file into the quantized INT8 MFCC input expected by the TFLite model.
 - `evaluate_spike_testset.py`: run test-set evaluation through Spike.
 - `kws/`: dataset loading and model definitions.
 - `tflm_demo/`: TensorFlow Lite Micro inference demo code.
 - `artifacts/`: generated training and export outputs. This directory is excluded from Git and should be regenerated locally.
+- `sweep_artifacts/`: outputs of `sweep_ds_cnn.py` (CSV, summary, per-tier best.keras + report.json). Excluded from Git.
+- `sweep_cache/`: on-disk MFCC feature cache used by both training scripts. Excluded from Git.
 - `tools/setup_third_party.sh`: helper script to clone external source dependencies locally.
 
 ## File Guide
@@ -82,7 +90,8 @@ The project pipeline is:
 - `README.md`: project overview, setup steps, and usage instructions.
 - `.gitignore`: excludes local environments, datasets, generated artifacts, and large third-party dependencies from Git.
 - `Makefile`: builds and runs the RISC-V TensorFlow Lite Micro demo.
-- `train_kws.py`: main training entry point for the keyword spotting models and INT8 export.
+- `train_kws.py`: main training entry point for a single keyword-spotting model and INT8 export. Supports `--retrain-from-sweep` for retraining a swept architecture with full noise augmentation.
+- `sweep_ds_cnn.py`: two-stage hyperparameter sweep over the DS-CNN search space (layers / filters / kernel / first stride / MFCC bins) under the S, M, L int8 memory and ops budgets.
 - `export_int8_mfcc.py`: converts a WAV file into the quantized model input used by TFLM inference.
 - `evaluate_spike_testset.py`: evaluates the test split by repeatedly running the RISC-V ELF on Spike.
 - `Project Proposal_ Optimization and Performance Analysis of Keyword Spotting (KWS) on RISC-V Platforms.docx`: project proposal source document.
@@ -91,8 +100,8 @@ The project pipeline is:
 ### `kws/`
 
 - `kws/__init__.py`: package marker for the Python KWS utilities.
-- `kws/data.py`: dataset indexing, train/validation/test split handling, audio preprocessing, MFCC extraction, and TensorFlow dataset construction.
-- `kws/models.py`: model definitions for the baseline CNN and DS-CNN architectures, plus a simple activation-memory estimator.
+- `kws/data.py`: dataset indexing, train/validation/test split handling, audio preprocessing, MFCC extraction, and TensorFlow dataset construction. MFCC features cached on disk via `DatasetConfig.cache_dir`; the cache key includes `feature_bins` so MFCC-bin-10 and MFCC-bin-40 caches stay separate.
+- `kws/models.py`: model definitions for the baseline Sainath CNNs and a fully parameterized DS-CNN (`build_ds_cnn(layers, filters, kernel, first_stride, dropout)`), plus per-layer MAC and activation-memory estimators used by the sweep's analytic budget filter.
 
 ### `tflm_demo/`
 
@@ -181,7 +190,11 @@ tar -xzf speech_commands_v0.02.tar.gz -C speech-commands-v2 --strip-components=1
 
 ## Training
 
-Train the optimized DS-CNN model:
+Two model-side tasks live in this repo. They can be run independently.
+
+### Task 1 — Baseline DS-CNN at 49×40 MFCC
+
+Single training run with the standard *Hello Edge* MFCC configuration (40 MFCC bins, 40 ms frame, 20 ms stride → 49×40 features per 1 second clip). Reports accuracy / int8 memory / ops.
 
 ```bash
 source .venv/bin/activate
@@ -190,40 +203,98 @@ python train_kws.py \
   --model ds_cnn \
   --epochs 15 \
   --batch-size 64 \
+  --cache-dir sweep_cache \
   --export-int8
 ```
 
-Train the baseline CNN:
+The available `--model` choices are `ds_cnn`, `cnn_trad_fpool3`, and `cnn_one_fstride4` (the last two are the two Sainath & Parada 2015 baselines).
+
+Generated outputs land in `artifacts/<model_name>/`:
+
+- `best.keras`, `final.keras`, `history.csv`, `report.json`
+- `model_int8.tflite` (when `--export-int8` is set)
+- `model_data.cc`, `model_data.h` (when generated for the TFLM demo)
+
+`report.json` contains parameter count, MACs, ops, int8 weight bytes, peak activation bytes, fp32 train/val/test accuracy, and (with `--export-int8`) int8 train/val/test accuracy.
+
+### Task 2 — Hyperparameter sweep for best S/M/L models
+
+Two-stage Plan-C sweep that finds the best DS-CNN per int8 memory / ops budget tier:
+
+| Tier | Memory | Ops |
+| ---- | ------ | --- |
+| S    | ≤ 80 KB  | ≤ 6 MOps  |
+| M    | ≤ 200 KB | ≤ 20 MOps |
+| L    | ≤ 500 KB | ≤ 80 MOps |
+
+Search space: `layers ∈ {4, 5, 6}`, `filters ∈ {64, 76, 96, 128, 172, 276}`, `kernel ∈ {(3,3), (5,3), (10,4), (20,8)}`, `first_stride ∈ {(1,1), (2,1), (1,2), (2,2)}`, `mfcc_bins ∈ {10, 40}`.
+
+Stage 1 randomly samples configurations per tier, analytically rejects those over budget (using model parameter count + peak int8 activation memory), and trains each survivor for a few epochs. Stage 2 takes the top-K of stage 1 per tier and trains them longer with EarlyStopping; the best validation accuracy per tier is saved as the final S / M / L model.
+
+Run the full sweep:
 
 ```bash
 source .venv/bin/activate
-python train_kws.py \
+python sweep_ds_cnn.py \
   --data-dir speech-commands-v2 \
-  --model baseline_cnn \
-  --epochs 15 \
-  --batch-size 64 \
-  --export-int8
+  --batch-size 512 \
+  --no-noise-aug
 ```
 
-Useful options:
+Recommended on a cloud GPU (e.g. Kaggle Tesla T4):
 
-- `--keywords yes no stop go` selects the core keyword subset.
-- `--max-train-samples`, `--max-val-samples`, and `--max-test-samples` are useful for smoke tests.
+```bash
+python sweep_ds_cnn.py \
+  --data-dir /kaggle/input/datasets/sylkaladin/speech-commands-v2 \
+  --batch-size 512 \
+  --no-noise-aug
+```
+
+Useful flags:
+
+- `--candidates-per-tier 30` (default) — target number of in-budget candidates to sample per tier.
+- `--top-k 3` (default) — number of stage-1 winners promoted to stage 2.
+- `--stage1-epochs 5 --stage2-epochs 15` (defaults) — epoch budgets.
+- `--tiers S M` — restrict the sweep to specific budget tiers.
+- `--no-noise-aug` — disable per-batch background-noise mixing during the sweep. Removes the per-batch wav read from the data pipeline (3–5× faster on CPU-bound machines). Recommended for the sweep itself; re-enable for the final retrain.
+- `--dry-run` — only sample + analytically score candidates; skip training.
+
+Outputs land in `sweep_artifacts/`:
+
+```
+sweep_artifacts/
+├── sweep_results.csv             # every candidate, both stages: config + cost + val_acc
+├── summary.json                  # final per-tier winners
+├── ds_cnn_S_top{1..3}/           # stage-2 candidates kept for inspection
+├── ds_cnn_M_top{1..3}/
+├── ds_cnn_L_top{1..3}/
+├── ds_cnn_S/{best.keras, report.json}   # final winner per tier
+├── ds_cnn_M/{best.keras, report.json}
+└── ds_cnn_L/{best.keras, report.json}
+```
+
+### Final retrain from a sweep result (with full noise augmentation)
+
+The sweep itself runs with `--no-noise-aug` for speed. To obtain a production-quality model for the chosen architecture, retrain it through `train_kws.py --retrain-from-sweep`, which reads the architecture and MFCC bin count from the sweep's `report.json` and re-applies background noise augmentation by default:
+
+```bash
+python train_kws.py --retrain-from-sweep sweep_artifacts/ds_cnn_S/report.json --epochs 30 --cache-dir sweep_cache --export-int8
+python train_kws.py --retrain-from-sweep sweep_artifacts/ds_cnn_M/report.json --epochs 30 --cache-dir sweep_cache --export-int8
+python train_kws.py --retrain-from-sweep sweep_artifacts/ds_cnn_L/report.json --epochs 30 --cache-dir sweep_cache --export-int8
+```
+
+Outputs go to `artifacts/ds_cnn_<tier>_retrained/`.
+
+### Common options for both scripts
+
+- `--keywords yes no stop go` selects a custom keyword subset.
+- `--max-train-samples`, `--max-val-samples`, `--max-test-samples` are useful for smoke tests.
 - `--output-dir` changes the artifact location.
-
-Generated outputs are written under `artifacts/<model_name>/`, including:
-
-- `best.keras`
-- `final.keras`
-- `history.csv`
-- `report.json`
-- `model_int8.tflite`
-- `model_data.cc`
-- `model_data.h`
+- `--cache-dir sweep_cache` reuses MFCC features across runs (the cache key includes `feature_bins/mel_bins/keywords`, so 10-bin and 40-bin caches coexist safely).
 
 ## Export INT8 MFCC Input
 
-Convert a WAV file into the quantized `49x10x1` INT8 MFCC input expected by the TFLite model:
+Convert a WAV file into the quantized `49x40x1` INT8 MFCC input expected by the default DS-CNN TFLite model (or `49x10x1` if the model was trained with `mfcc_bins=10`):
 
 ```bash
 source .venv/bin/activate

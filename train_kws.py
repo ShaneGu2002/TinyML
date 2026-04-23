@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import tensorflow as tf
@@ -40,6 +41,17 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Directory for caching preprocessed MFCC features. Huge speedup on repeated training.",
+    )
+    parser.add_argument(
+        "--retrain-from-sweep",
+        type=Path,
+        default=None,
+        help=(
+            "Retrain a swept DS-CNN: load architecture (layers/filters/kernel/first_stride) "
+            "and MFCC bin count from a sweep report.json (e.g. "
+            "sweep_artifacts/ds_cnn_S/report.json). Forces --model ds_cnn. Output dir "
+            "becomes ds_cnn_<tier>_retrained. Background-noise augmentation is on by default."
+        ),
     )
     return parser.parse_args()
 
@@ -99,6 +111,23 @@ def main() -> None:
     args = parse_args()
     tf.keras.utils.set_random_seed(args.seed)
 
+    ds_cnn_kwargs: dict = {}
+    mfcc_bins = 40
+    sweep_tier: Optional[str] = None
+    if args.retrain_from_sweep is not None:
+        report = json.loads(args.retrain_from_sweep.read_text())
+        cfg = report["config"]
+        args.model = "ds_cnn"
+        mfcc_bins = int(cfg["mfcc_bins"])
+        ds_cnn_kwargs = {
+            "layers": int(cfg["layers"]),
+            "filters": int(cfg["filters"]),
+            "kernel": tuple(cfg["kernel"]),
+            "first_stride": tuple(cfg["first_stride"]),
+        }
+        sweep_tier = report.get("tier")
+        print(f"Loaded sweep config (tier={sweep_tier}): mfcc_bins={mfcc_bins}, {ds_cnn_kwargs}")
+
     config = DatasetConfig(
         data_dir=args.data_dir,
         keywords=args.keywords,
@@ -110,17 +139,25 @@ def main() -> None:
         max_val_samples=args.max_val_samples,
         max_test_samples=args.max_test_samples,
         cache_dir=args.cache_dir,
+        feature_bins=mfcc_bins,
+        mel_bins=mfcc_bins,
     )
 
     datasets, splits, input_shape = build_datasets(config)
-    model = build_model(args.model, input_shape=input_shape, num_classes=len(config.labels))
+    model = build_model(
+        args.model,
+        input_shape=input_shape,
+        num_classes=len(config.labels),
+        **ds_cnn_kwargs,
+    )
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=args.learning_rate),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(),
         metrics=["accuracy"],
     )
 
-    output_dir = args.output_dir / args.model
+    out_subdir = f"ds_cnn_{sweep_tier}_retrained" if sweep_tier else args.model
+    output_dir = args.output_dir / out_subdir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     callbacks = [

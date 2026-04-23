@@ -1,5 +1,8 @@
+import hashlib
+import json
 import math
 import random
+import re
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +14,21 @@ import tensorflow as tf
 BACKGROUND_NOISE_LABEL = "_background_noise_"
 SILENCE_LABEL = "_silence_"
 UNKNOWN_LABEL = "_unknown_"
+MAX_NUM_WAVS_PER_CLASS = 2 ** 27 - 1
+
+
+def which_set(filename: str, val_percentage: float, test_percentage: float) -> str:
+    base = Path(filename).name
+    hash_name = re.sub(r"_nohash_.*$", "", base)
+    digest = hashlib.sha1(hash_name.encode("utf-8")).hexdigest()
+    bucket = (int(digest, 16) % (MAX_NUM_WAVS_PER_CLASS + 1)) * (
+        100.0 / MAX_NUM_WAVS_PER_CLASS
+    )
+    if bucket < val_percentage:
+        return "val"
+    if bucket < val_percentage + test_percentage:
+        return "test"
+    return "train"
 
 
 @dataclass
@@ -20,10 +38,12 @@ class DatasetConfig:
     seed: int = 42
     sample_rate: int = 16000
     clip_duration_ms: int = 1000
-    window_size_ms: float = 30.0
+    window_size_ms: float = 40.0
     window_stride_ms: float = 20.0
-    feature_bins: int = 10
+    feature_bins: int = 40
     mel_bins: int = 40
+    val_percentage: float = 10.0
+    test_percentage: float = 10.0
     lower_frequency: float = 20.0
     upper_frequency: float = 4000.0
     batch_size: int = 64
@@ -36,10 +56,34 @@ class DatasetConfig:
     max_train_samples: Optional[int] = None
     max_val_samples: Optional[int] = None
     max_test_samples: Optional[int] = None
-    cache_validation: bool = True
-    cache_test: bool = True
+    cache_dir: Optional[Path] = None
     num_parallel_calls: int = tf.data.AUTOTUNE
     prefetch_buffer: int = tf.data.AUTOTUNE
+
+    def cache_key(self) -> str:
+        key = {
+            "sample_rate": self.sample_rate,
+            "clip_duration_ms": self.clip_duration_ms,
+            "window_size_ms": self.window_size_ms,
+            "window_stride_ms": self.window_stride_ms,
+            "feature_bins": self.feature_bins,
+            "mel_bins": self.mel_bins,
+            "lower_frequency": self.lower_frequency,
+            "upper_frequency": self.upper_frequency,
+            "keywords": sorted(self.keywords),
+            "include_unknown": self.include_unknown,
+            "include_silence": self.include_silence,
+            "unknown_ratio": self.unknown_ratio,
+            "silence_ratio": self.silence_ratio,
+            "val_percentage": self.val_percentage,
+            "test_percentage": self.test_percentage,
+            "seed": self.seed,
+            "max_train_samples": self.max_train_samples,
+            "max_val_samples": self.max_val_samples,
+            "max_test_samples": self.max_test_samples,
+        }
+        digest = hashlib.sha1(json.dumps(key, sort_keys=True).encode()).hexdigest()
+        return digest[:16]
 
     @property
     def desired_samples(self) -> int:
@@ -61,14 +105,6 @@ class DatasetConfig:
         if self.include_silence:
             labels.append(SILENCE_LABEL)
         return labels
-
-
-def _read_list_file(path: Path) -> set[str]:
-    return {line.strip() for line in path.read_text().splitlines() if line.strip()}
-
-
-def _relative_audio_path(audio_path: Path, root: Path) -> str:
-    return audio_path.relative_to(root).as_posix()
 
 
 def _limit_samples(items: List[Tuple[str, str, int]], max_samples: Optional[int], seed: int) -> List[Tuple[str, str, int]]:
@@ -108,11 +144,9 @@ def _load_background_segments(noise_dir: Path, clip_samples: int, seed: int) -> 
 
 def build_file_index(config: DatasetConfig) -> Dict[str, List[Tuple[str, str, int]]]:
     data_dir = config.data_dir
-    validation_files = _read_list_file(data_dir / "validation_list.txt")
-    testing_files = _read_list_file(data_dir / "testing_list.txt")
 
-    keyword_examples: List[Tuple[str, str, int]] = []
-    unknown_examples: List[Tuple[str, str, int]] = []
+    keyword_examples: List[Tuple[str, str, int, str]] = []
+    unknown_examples: List[Tuple[str, str, int, str]] = []
 
     for label_dir in sorted(data_dir.iterdir()):
         if not label_dir.is_dir():
@@ -123,11 +157,7 @@ def build_file_index(config: DatasetConfig) -> Dict[str, List[Tuple[str, str, in
 
         target_list = keyword_examples if label in config.keywords else unknown_examples
         for wav_path in sorted(label_dir.glob("*.wav")):
-            relative = _relative_audio_path(wav_path, data_dir)
-            if relative in validation_files or relative in testing_files:
-                split = "val" if relative in validation_files else "test"
-            else:
-                split = "train"
+            split = which_set(wav_path.name, config.val_percentage, config.test_percentage)
             target_list.append((str(wav_path), label, 0, split))
 
     splits: Dict[str, List[Tuple[str, str, int]]] = {"train": [], "val": [], "test": []}
@@ -246,6 +276,7 @@ def _make_example_dataset(
     examples: Sequence[Tuple[str, str, int]],
     config: DatasetConfig,
     training: bool,
+    split_name: str,
 ) -> tf.data.Dataset:
     label_to_index = {label: idx for idx, label in enumerate(config.labels)}
     paths = [path for path, _, _ in examples]
@@ -253,8 +284,6 @@ def _make_example_dataset(
     offsets = [offset for _, _, offset in examples]
 
     dataset = tf.data.Dataset.from_tensor_slices((paths, labels, offsets))
-    if training:
-        dataset = dataset.shuffle(len(paths), seed=config.seed, reshuffle_each_iteration=True)
 
     def load_example(path: tf.Tensor, label: tf.Tensor, offset: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         audio = _decode_audio(tf.io.read_file(path))
@@ -263,7 +292,27 @@ def _make_example_dataset(
         return features, label
 
     dataset = dataset.map(load_example, num_parallel_calls=config.num_parallel_calls)
+
+    if config.cache_dir is not None:
+        cache_subdir = Path(config.cache_dir) / config.cache_key()
+        cache_subdir.mkdir(parents=True, exist_ok=True)
+        (cache_subdir / "config.json").write_text(
+            json.dumps(
+                {
+                    "feature_bins": config.feature_bins,
+                    "window_size_ms": config.window_size_ms,
+                    "window_stride_ms": config.window_stride_ms,
+                    "keywords": list(config.keywords),
+                },
+                indent=2,
+            )
+        )
+        dataset = dataset.cache(str(cache_subdir / split_name))
+    elif not training:
+        dataset = dataset.cache()
+
     if training:
+        dataset = dataset.shuffle(len(paths), seed=config.seed, reshuffle_each_iteration=True)
         noise_dataset = _build_noise_dataset(config)
         if noise_dataset is not None:
             dataset = tf.data.Dataset.zip((dataset, noise_dataset))
@@ -291,14 +340,10 @@ def _make_example_dataset(
 def build_datasets(config: DatasetConfig) -> Tuple[Dict[str, tf.data.Dataset], Dict[str, List[Tuple[str, str, int]]], Tuple[int, int, int]]:
     splits = build_file_index(config)
     datasets = {
-        "train": _make_example_dataset(splits["train"], config, training=True),
-        "val": _make_example_dataset(splits["val"], config, training=False),
-        "test": _make_example_dataset(splits["test"], config, training=False),
+        "train": _make_example_dataset(splits["train"], config, training=True, split_name="train"),
+        "val": _make_example_dataset(splits["val"], config, training=False, split_name="val"),
+        "test": _make_example_dataset(splits["test"], config, training=False, split_name="test"),
     }
-    if config.cache_validation:
-        datasets["val"] = datasets["val"].cache()
-    if config.cache_test:
-        datasets["test"] = datasets["test"].cache()
 
     feature_frames = 1 + max(0, math.floor((config.desired_samples - config.window_size_samples) / config.window_stride_samples))
     feature_shape = (feature_frames, config.feature_bins, 1)

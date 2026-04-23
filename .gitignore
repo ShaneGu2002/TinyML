@@ -13,11 +13,12 @@ build/
 
 # Generated model artifacts
 artifacts/
-quantized_artifacts/
-sanity_artifacts/
 *.keras
 *.tflite
 *.npy
+
+# Cached MFCC features (produced by --cache-dir)
+sweep_cache/
 
 # Local datasets
 speech-commands-v2/

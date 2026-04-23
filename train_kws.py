@@ -2,19 +2,28 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 import tensorflow as tf
 from tensorflow.python.framework.convert_to_constants import convert_variables_to_constants_v2
 
 from kws.data import DatasetConfig, build_datasets
-from kws.models import build_model, estimate_peak_activation_bytes
+from kws.models import build_model, estimate_operations, estimate_peak_activation_bytes
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train TensorFlow keyword spotting models.")
     parser.add_argument("--data-dir", type=Path, default=Path("speech-commands-v2"))
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
-    parser.add_argument("--model", choices=["baseline_cnn", "ds_cnn"], default="ds_cnn")
-    parser.add_argument("--keywords", nargs="+", default=["yes", "no", "stop", "go"])
+    parser.add_argument(
+        "--model",
+        choices=["cnn_trad_fpool3", "cnn_one_fstride4", "ds_cnn"],
+        default="ds_cnn",
+    )
+    parser.add_argument(
+        "--keywords",
+        nargs="+",
+        default=["yes", "no", "up", "down", "left", "right", "on", "off", "stop", "go"],
+    )
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -26,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-silence", action="store_true")
     parser.add_argument("--export-int8", action="store_true")
     parser.add_argument("--representative-samples", type=int, default=200)
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Directory for caching preprocessed MFCC features. Huge speedup on repeated training.",
+    )
     return parser.parse_args()
 
 
@@ -36,6 +51,28 @@ def representative_dataset(dataset: tf.data.Dataset, limit: int):
         count += 1
         if count >= limit:
             break
+
+
+def evaluate_tflite(tflite_path: Path, dataset: tf.data.Dataset) -> float:
+    """Run the int8 TFLite model sample-by-sample and return top-1 accuracy."""
+    interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
+    interpreter.allocate_tensors()
+    in_det = interpreter.get_input_details()[0]
+    out_det = interpreter.get_output_details()[0]
+    in_scale, in_zp = in_det["quantization"]
+
+    correct, total = 0, 0
+    for features, labels in dataset.unbatch().batch(1):
+        x = features.numpy().astype(np.float32)
+        if in_scale > 0:
+            x = np.round(x / in_scale + in_zp)
+        x = np.clip(x, np.iinfo(in_det["dtype"]).min, np.iinfo(in_det["dtype"]).max).astype(in_det["dtype"])
+        interpreter.set_tensor(in_det["index"], x)
+        interpreter.invoke()
+        pred = interpreter.get_tensor(out_det["index"])
+        correct += int(np.argmax(pred) == int(labels.numpy()[0]))
+        total += 1
+    return correct / max(total, 1)
 
 
 def export_int8_tflite(
@@ -72,6 +109,7 @@ def main() -> None:
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
         max_test_samples=args.max_test_samples,
+        cache_dir=args.cache_dir,
     )
 
     datasets, splits, input_shape = build_datasets(config)
@@ -101,15 +139,24 @@ def main() -> None:
         tf.keras.callbacks.CSVLogger(str(output_dir / "history.csv")),
     ]
 
-    history = model.fit(
+    model.fit(
         datasets["train"],
         validation_data=datasets["val"],
         epochs=args.epochs,
         callbacks=callbacks,
     )
-    test_metrics = model.evaluate(datasets["test"], return_dict=True)
+
+    print("Evaluating FP32 model on train/val/test …")
+    fp32_train = model.evaluate(datasets["train"], return_dict=True, verbose=0)
+    fp32_val = model.evaluate(datasets["val"], return_dict=True, verbose=0)
+    fp32_test = model.evaluate(datasets["test"], return_dict=True, verbose=0)
 
     model.save(output_dir / "final.keras")
+
+    total_samples = len(splits["train"]) + len(splits["val"]) + len(splits["test"])
+    macs = estimate_operations(model)
+    int8_weights_bytes = model.count_params()
+    int8_peak_activation_bytes = estimate_peak_activation_bytes(model, bytes_per_element=1)
 
     report = {
         "model": args.model,
@@ -118,12 +165,22 @@ def main() -> None:
         "num_train_samples": len(splits["train"]),
         "num_val_samples": len(splits["val"]),
         "num_test_samples": len(splits["test"]),
+        "split_ratio": {
+            "train": len(splits["train"]) / total_samples,
+            "val": len(splits["val"]) / total_samples,
+            "test": len(splits["test"]) / total_samples,
+        },
         "parameter_count": model.count_params(),
+        "macs_per_inference": macs,
+        "ops_per_inference": 2 * macs,
         "estimated_peak_activation_bytes_fp32": estimate_peak_activation_bytes(model),
-        "final_train_accuracy": history.history["accuracy"][-1],
-        "best_val_accuracy": max(history.history["val_accuracy"]),
-        "test_loss": test_metrics["loss"],
-        "test_accuracy": test_metrics["accuracy"],
+        "int8_weights_bytes": int8_weights_bytes,
+        "int8_peak_activation_bytes": int8_peak_activation_bytes,
+        "int8_total_memory_bytes": int8_weights_bytes + int8_peak_activation_bytes,
+        "fp32_train_accuracy": fp32_train["accuracy"],
+        "fp32_val_accuracy": fp32_val["accuracy"],
+        "fp32_test_accuracy": fp32_test["accuracy"],
+        "fp32_test_loss": fp32_test["loss"],
     }
 
     final_model_path = output_dir / "final.keras"
@@ -137,6 +194,10 @@ def main() -> None:
             rep_samples=args.representative_samples,
         )
         report["int8_tflite_size_bytes"] = tflite_path.stat().st_size
+        print("Evaluating int8 TFLite on train/val/test …")
+        report["int8_train_accuracy"] = evaluate_tflite(tflite_path, datasets["train"])
+        report["int8_val_accuracy"] = evaluate_tflite(tflite_path, datasets["val"])
+        report["int8_test_accuracy"] = evaluate_tflite(tflite_path, datasets["test"])
 
     with (output_dir / "report.json").open("w") as report_file:
         json.dump(report, report_file, indent=2)

@@ -125,6 +125,30 @@ def build_cnn(
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="cnn")
 
 
+def build_dnn(
+    input_shape: Tuple[int, int, int],
+    num_classes: int,
+    layers: int = 3,
+    units: int = 144,
+    dropout: float = 0.3,
+) -> tf.keras.Model:
+    """Hello Edge style fully-connected DNN (Appendix A, Table 4).
+
+    Flatten -> (Dense + ReLU [+ Dropout]) x `layers` -> Dense softmax.
+    No BatchNorm, matching the paper's baseline. `dropout=0` disables it.
+    """
+    if layers < 1:
+        raise ValueError(f"layers must be >= 1, got {layers}")
+    inputs = tf.keras.Input(shape=input_shape, name="mfcc")
+    x = tf.keras.layers.Flatten(name="flatten")(inputs)
+    for i in range(1, layers + 1):
+        x = tf.keras.layers.Dense(units, activation="relu", name=f"fc{i}")(x)
+        if dropout > 0:
+            x = tf.keras.layers.Dropout(dropout, name=f"fc{i}_dropout")(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="classifier")(x)
+    return tf.keras.Model(inputs=inputs, outputs=outputs, name="dnn")
+
+
 def build_ds_cnn(
     input_shape: Tuple[int, int, int],
     num_classes: int,
@@ -165,6 +189,8 @@ def build_model(
         return build_cnn(input_shape=input_shape, num_classes=num_classes, **kwargs)
     if model_name == "ds_cnn":
         return build_ds_cnn(input_shape=input_shape, num_classes=num_classes, **kwargs)
+    if model_name == "dnn":
+        return build_dnn(input_shape=input_shape, num_classes=num_classes, **kwargs)
     raise ValueError(f"Unsupported model_name: {model_name}")
 
 

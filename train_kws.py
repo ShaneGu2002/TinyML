@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
     parser.add_argument(
         "--model",
-        choices=["cnn_trad_fpool3", "cnn_one_fstride4", "cnn", "ds_cnn"],
+        choices=["cnn_trad_fpool3", "cnn_one_fstride4", "cnn", "ds_cnn", "dnn"],
         default="ds_cnn",
     )
     parser.add_argument(
@@ -51,6 +51,16 @@ def parse_args() -> argparse.Namespace:
             "count from a sweep report.json (e.g. sweep_artifacts/ds_cnn_S/report.json "
             "or sweep_artifacts/cnn_S/report.json). --model is taken from the report. "
             "Output dir becomes <model>_<tier>_retrained."
+        ),
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help=(
+            "Override the model builder's dropout rate. When omitted, each builder uses "
+            "its own default (dnn=0.5, cnn=0.1, ds_cnn=0.15). Silently ignored by builders "
+            "that do not accept a dropout kwarg (cnn_trad_fpool3, cnn_one_fstride4)."
         ),
     )
     return parser.parse_args()
@@ -132,6 +142,12 @@ def main() -> None:
                 "filters": int(cfg["filters"]),
                 "kernel": tuple(cfg["kernel"]),
                 "pool": tuple(cfg["pool"]),
+            }
+        elif args.model == "dnn":
+            model_kwargs = {
+                "layers": int(cfg["layers"]),
+                "units": int(cfg["units"]),
+                "dropout": float(cfg.get("dropout", 0.0)),
             }
         else:
             raise ValueError(f"--retrain-from-sweep not supported for model={args.model}")

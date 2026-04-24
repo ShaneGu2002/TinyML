@@ -1,4 +1,5 @@
-"""Hello-Edge style two-stage hyperparameter sweep for DS-CNN models.
+"""Hello-Edge style two-stage hyperparameter sweep for the CNN baseline
+(Sainath & Parada 2015 architecture stabilized with BatchNorm).
 
 Stage 1: per budget tier, sample random configs from the search space,
 analytically reject those that exceed the int8 memory / op budget, and
@@ -6,15 +7,15 @@ train each survivor for a few epochs.
 
 Stage 2: take the top-K of stage 1 per tier and train them for more epochs
 with early stopping. The best validation accuracy per tier is kept as the
-final ds_cnn_S / ds_cnn_M / ds_cnn_L model.
+final cnn_S / cnn_M / cnn_L model.
 
 Outputs land under ``--output-dir`` (default ``sweep_artifacts/``)::
 
     sweep_artifacts/
-    ├── sweep_results.csv           # every candidate, both stages
-    ├── ds_cnn_S/{best.keras, report.json}
-    ├── ds_cnn_M/{best.keras, report.json}
-    └── ds_cnn_L/{best.keras, report.json}
+    ├── cnn_sweep_results.csv       # every candidate, both stages
+    ├── cnn_S/{best.keras, report.json}
+    ├── cnn_M/{best.keras, report.json}
+    └── cnn_L/{best.keras, report.json}
 """
 
 import argparse
@@ -28,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 import tensorflow as tf
 
 from kws.data import DatasetConfig, build_datasets
-from kws.models import build_ds_cnn, estimate_operations, estimate_peak_activation_bytes
+from kws.models import build_cnn, estimate_operations, estimate_peak_activation_bytes
 
 
 KEYWORDS = ["yes", "no", "up", "down", "left", "right", "on", "off", "stop", "go"]
@@ -40,18 +41,24 @@ BUDGETS: Dict[str, Dict[str, int]] = {
     "L": {"memory_bytes": 500 * 1024, "ops": 80_000_000},
 }
 
+# Hyperparameters per Hello Edge (Zhang et al. 2017) Table 4 for CNN:
+#   Number of Conv layers, features / kernel size / stride, linear layer dim, FC layer size.
 SEARCH_SPACE = {
-    "layers":       [4, 5, 6],
-    "filters":      [64, 76, 96, 128, 172, 276],
-    "kernel":       [(3, 3), (5, 3), (10, 4), (20, 8)],
-    "first_stride": [(1, 1), (2, 1), (1, 2), (2, 2)],
-    "mfcc_bins":    [10, 40],
+    "num_conv_layers": [1, 2],
+    "conv_filters":    [32, 48, 64, 96, 128, 186],
+    "conv_kernel":     [(3, 3), (5, 3), (10, 4), (20, 8)],
+    "first_stride":    [(1, 1), (2, 1), (1, 2), (2, 2)],
+    "pool_f":          [1, 2, 3],
+    "linear_dim":      [16, 32, 64],
+    "fc_size":         [64, 128, 256],
+    "mfcc_bins":       [10, 40],
 }
 
 CSV_COLUMNS = [
     "tier", "stage", "rank",
-    "layers", "filters",
-    "kernel_t", "kernel_f", "stride_t", "stride_f", "mfcc_bins",
+    "num_conv_layers", "conv_filters",
+    "kernel_t", "kernel_f", "stride_t", "stride_f", "pool_f",
+    "linear_dim", "fc_size", "mfcc_bins",
     "params", "weight_bytes", "act_bytes", "memory_bytes",
     "macs", "ops", "epochs", "val_accuracy",
 ]
@@ -103,28 +110,41 @@ def feature_frame_count(sample_rate: int = 16000, clip_ms: int = 1000,
 
 def sample_config(rng: random.Random) -> Dict:
     return {
-        "layers":       rng.choice(SEARCH_SPACE["layers"]),
-        "filters":      rng.choice(SEARCH_SPACE["filters"]),
-        "kernel":       tuple(rng.choice(SEARCH_SPACE["kernel"])),
-        "first_stride": tuple(rng.choice(SEARCH_SPACE["first_stride"])),
-        "mfcc_bins":    rng.choice(SEARCH_SPACE["mfcc_bins"]),
+        "num_conv_layers": rng.choice(SEARCH_SPACE["num_conv_layers"]),
+        "conv_filters":    rng.choice(SEARCH_SPACE["conv_filters"]),
+        "conv_kernel":     tuple(rng.choice(SEARCH_SPACE["conv_kernel"])),
+        "first_stride":    tuple(rng.choice(SEARCH_SPACE["first_stride"])),
+        "pool_f":          rng.choice(SEARCH_SPACE["pool_f"]),
+        "linear_dim":      rng.choice(SEARCH_SPACE["linear_dim"]),
+        "fc_size":         rng.choice(SEARCH_SPACE["fc_size"]),
+        "mfcc_bins":       rng.choice(SEARCH_SPACE["mfcc_bins"]),
     }
 
 
 def config_key(cfg: Dict) -> Tuple:
-    return (cfg["layers"], cfg["filters"], cfg["kernel"], cfg["first_stride"], cfg["mfcc_bins"])
+    return (
+        cfg["num_conv_layers"], cfg["conv_filters"], cfg["conv_kernel"],
+        cfg["first_stride"], cfg["pool_f"],
+        cfg["linear_dim"], cfg["fc_size"], cfg["mfcc_bins"],
+    )
 
 
 def build_candidate_model(cfg: Dict, num_classes: int) -> tf.keras.Model:
     tf.keras.backend.clear_session()
     input_shape = (feature_frame_count(), cfg["mfcc_bins"], 1)
-    return build_ds_cnn(
+    # A pool factor > frequency bins would collapse the frequency axis.
+    if cfg["pool_f"] > cfg["mfcc_bins"]:
+        raise ValueError(f"pool_f={cfg['pool_f']} > mfcc_bins={cfg['mfcc_bins']}")
+    return build_cnn(
         input_shape=input_shape,
         num_classes=num_classes,
-        layers=cfg["layers"],
-        filters=cfg["filters"],
-        kernel=cfg["kernel"],
+        num_conv_layers=cfg["num_conv_layers"],
+        conv_filters=cfg["conv_filters"],
+        conv_kernel=cfg["conv_kernel"],
         first_stride=cfg["first_stride"],
+        pool_f=cfg["pool_f"],
+        linear_dim=cfg["linear_dim"],
+        fc_size=cfg["fc_size"],
     )
 
 
@@ -242,9 +262,12 @@ def make_csv_row(tier: str, stage: int, rank: int, cfg: Dict, cost: Dict[str, in
                  epochs: int, val_accuracy: Optional[float]) -> Dict:
     return {
         "tier": tier, "stage": stage, "rank": rank,
-        "layers": cfg["layers"], "filters": cfg["filters"],
-        "kernel_t": cfg["kernel"][0], "kernel_f": cfg["kernel"][1],
+        "num_conv_layers": cfg["num_conv_layers"],
+        "conv_filters": cfg["conv_filters"],
+        "kernel_t": cfg["conv_kernel"][0], "kernel_f": cfg["conv_kernel"][1],
         "stride_t": cfg["first_stride"][0], "stride_f": cfg["first_stride"][1],
+        "pool_f": cfg["pool_f"],
+        "linear_dim": cfg["linear_dim"], "fc_size": cfg["fc_size"],
         "mfcc_bins": cfg["mfcc_bins"],
         "params": cost["params"], "weight_bytes": cost["weight_bytes"],
         "act_bytes": cost["act_bytes"], "memory_bytes": cost["memory_bytes"],
@@ -265,11 +288,10 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_path = args.output_dir / "sweep_results.csv"
+    csv_path = args.output_dir / "cnn_sweep_results.csv"
     with csv_path.open("w", newline="") as fh:
         csv.DictWriter(fh, fieldnames=CSV_COLUMNS).writeheader()
 
-    # Probe dataset to learn label count (10 keywords + unknown + silence by default)
     probe = DatasetConfig(
         data_dir=args.data_dir, keywords=KEYWORDS, seed=args.seed,
         feature_bins=SEARCH_SPACE["mfcc_bins"][0], mel_bins=SEARCH_SPACE["mfcc_bins"][0],
@@ -328,7 +350,7 @@ def main() -> None:
         # ---------------- Stage 2 ----------------
         stage2_results: List[Tuple[Dict, Dict[str, int], float, Dict, Path, tf.keras.Model]] = []
         for rank, (cfg, cost, _) in enumerate(top_k, start=1):
-            cand_dir = args.output_dir / f"ds_cnn_{tier}_top{rank}"
+            cand_dir = args.output_dir / f"cnn_{tier}_top{rank}"
             cand_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = cand_dir / "best.keras"
             callbacks = [
@@ -360,19 +382,22 @@ def main() -> None:
         stage2_results.sort(key=lambda item: item[2], reverse=True)
         best_cfg, best_cost, best_val, best_test, best_dir, best_model = stage2_results[0]
 
-        final_dir = args.output_dir / f"ds_cnn_{tier}"
+        final_dir = args.output_dir / f"cnn_{tier}"
         final_dir.mkdir(parents=True, exist_ok=True)
         best_model.save(final_dir / "best.keras")
         report = {
-            "model": "ds_cnn",
+            "model": "cnn",
             "tier": tier,
             "budget": budget,
             "config": {
-                "layers":       best_cfg["layers"],
-                "filters":      best_cfg["filters"],
-                "kernel":       list(best_cfg["kernel"]),
-                "first_stride": list(best_cfg["first_stride"]),
-                "mfcc_bins":    best_cfg["mfcc_bins"],
+                "num_conv_layers": best_cfg["num_conv_layers"],
+                "conv_filters":    best_cfg["conv_filters"],
+                "conv_kernel":     list(best_cfg["conv_kernel"]),
+                "first_stride":    list(best_cfg["first_stride"]),
+                "pool_f":          best_cfg["pool_f"],
+                "linear_dim":      best_cfg["linear_dim"],
+                "fc_size":         best_cfg["fc_size"],
+                "mfcc_bins":       best_cfg["mfcc_bins"],
             },
             "cost": best_cost,
             "val_accuracy": best_val,
@@ -388,7 +413,7 @@ def main() -> None:
 
     print("\n=== Sweep complete ===")
     print(json.dumps(summary, indent=2))
-    (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    (args.output_dir / "cnn_summary.json").write_text(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

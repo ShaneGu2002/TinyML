@@ -83,6 +83,42 @@ def build_cnn_one_fstride4(
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="cnn_one_fstride4")
 
 
+def build_cnn(
+    input_shape: Tuple[int, int, int],
+    num_classes: int,
+    num_conv_layers: int = 2,
+    conv_filters: int = 64,
+    conv_kernel: Tuple[int, int] = (10, 4),
+    first_stride: Tuple[int, int] = (1, 1),
+    pool_f: int = 3,
+    linear_dim: int = 32,
+    fc_size: int = 128,
+) -> tf.keras.Model:
+    """Sainath & Parada 2015 style CNN, stabilized with BatchNorm.
+
+    Matches the Hello Edge (Zhang et al. 2017) CNN hyperparameter set:
+    number of conv layers, conv features/kernel/stride, linear layer dim, FC
+    layer size. A MaxPool(1, pool_f) is applied along the frequency axis after
+    the first conv (cf. `cnn-trad-fpool3`). `first_stride` is applied to the
+    first conv layer; subsequent conv layers use stride (1, 1). `same` padding
+    is used so dimensions remain predictable across MFCC-bin settings.
+    """
+    if num_conv_layers < 1:
+        raise ValueError(f"num_conv_layers must be >= 1, got {num_conv_layers}")
+    inputs = tf.keras.Input(shape=input_shape, name="mfcc")
+    x = inputs
+    for i in range(num_conv_layers):
+        stride = first_stride if i == 0 else (1, 1)
+        x = conv_block(x, conv_filters, conv_kernel, strides=stride, name=f"conv{i + 1}")
+        if i == 0 and pool_f > 1:
+            x = tf.keras.layers.MaxPooling2D(pool_size=(1, pool_f), name="fpool")(x)
+    x = tf.keras.layers.Flatten(name="flatten")(x)
+    x = tf.keras.layers.Dense(linear_dim, name="linear")(x)
+    x = tf.keras.layers.Dense(fc_size, activation="relu", name="fc")(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="classifier")(x)
+    return tf.keras.Model(inputs=inputs, outputs=outputs, name="cnn")
+
+
 def build_ds_cnn(
     input_shape: Tuple[int, int, int],
     num_classes: int,
@@ -119,6 +155,8 @@ def build_model(
         return build_cnn_trad_fpool3(input_shape=input_shape, num_classes=num_classes)
     if model_name == "cnn_one_fstride4":
         return build_cnn_one_fstride4(input_shape=input_shape, num_classes=num_classes)
+    if model_name == "cnn":
+        return build_cnn(input_shape=input_shape, num_classes=num_classes, **kwargs)
     if model_name == "ds_cnn":
         return build_ds_cnn(input_shape=input_shape, num_classes=num_classes, **kwargs)
     raise ValueError(f"Unsupported model_name: {model_name}")

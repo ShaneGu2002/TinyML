@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
     parser.add_argument(
         "--model",
-        choices=["cnn_trad_fpool3", "cnn_one_fstride4", "ds_cnn"],
+        choices=["cnn_trad_fpool3", "cnn_one_fstride4", "cnn", "ds_cnn"],
         default="ds_cnn",
     )
     parser.add_argument(
@@ -47,10 +47,10 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Retrain a swept DS-CNN: load architecture (layers/filters/kernel/first_stride) "
-            "and MFCC bin count from a sweep report.json (e.g. "
-            "sweep_artifacts/ds_cnn_S/report.json). Forces --model ds_cnn. Output dir "
-            "becomes ds_cnn_<tier>_retrained. Background-noise augmentation is on by default."
+            "Retrain a swept model: load architecture hyperparameters and MFCC bin "
+            "count from a sweep report.json (e.g. sweep_artifacts/ds_cnn_S/report.json "
+            "or sweep_artifacts/cnn_S/report.json). --model is taken from the report. "
+            "Output dir becomes <model>_<tier>_retrained."
         ),
     )
     return parser.parse_args()
@@ -111,22 +111,36 @@ def main() -> None:
     args = parse_args()
     tf.keras.utils.set_random_seed(args.seed)
 
-    ds_cnn_kwargs: dict = {}
+    model_kwargs: dict = {}
     mfcc_bins = 40
     sweep_tier: Optional[str] = None
     if args.retrain_from_sweep is not None:
         report = json.loads(args.retrain_from_sweep.read_text())
         cfg = report["config"]
-        args.model = "ds_cnn"
+        args.model = report.get("model", "ds_cnn")
         mfcc_bins = int(cfg["mfcc_bins"])
-        ds_cnn_kwargs = {
-            "layers": int(cfg["layers"]),
-            "filters": int(cfg["filters"]),
-            "kernel": tuple(cfg["kernel"]),
-            "first_stride": tuple(cfg["first_stride"]),
-        }
+        if args.model == "ds_cnn":
+            model_kwargs = {
+                "layers": int(cfg["layers"]),
+                "filters": int(cfg["filters"]),
+                "kernel": tuple(cfg["kernel"]),
+                "first_stride": tuple(cfg["first_stride"]),
+            }
+        elif args.model == "cnn":
+            model_kwargs = {
+                "num_conv_layers": int(cfg["num_conv_layers"]),
+                "conv_filters": int(cfg["conv_filters"]),
+                "conv_kernel": tuple(cfg["conv_kernel"]),
+                "first_stride": tuple(cfg["first_stride"]),
+                "pool_f": int(cfg["pool_f"]),
+                "linear_dim": int(cfg["linear_dim"]),
+                "fc_size": int(cfg["fc_size"]),
+            }
+        else:
+            raise ValueError(f"--retrain-from-sweep not supported for model={args.model}")
         sweep_tier = report.get("tier")
-        print(f"Loaded sweep config (tier={sweep_tier}): mfcc_bins={mfcc_bins}, {ds_cnn_kwargs}")
+        print(f"Loaded sweep config (model={args.model}, tier={sweep_tier}): "
+              f"mfcc_bins={mfcc_bins}, {model_kwargs}")
 
     config = DatasetConfig(
         data_dir=args.data_dir,
@@ -148,7 +162,7 @@ def main() -> None:
         args.model,
         input_shape=input_shape,
         num_classes=len(config.labels),
-        **ds_cnn_kwargs,
+        **model_kwargs,
     )
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=args.learning_rate),
@@ -156,7 +170,7 @@ def main() -> None:
         metrics=["accuracy"],
     )
 
-    out_subdir = f"ds_cnn_{sweep_tier}_retrained" if sweep_tier else args.model
+    out_subdir = f"{args.model}_{sweep_tier}_retrained" if sweep_tier else args.model
     output_dir = args.output_dir / out_subdir
     output_dir.mkdir(parents=True, exist_ok=True)
 

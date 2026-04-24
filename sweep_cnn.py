@@ -1,5 +1,5 @@
-"""Hello-Edge style two-stage hyperparameter sweep for the CNN baseline
-(Sainath & Parada 2015 architecture stabilized with BatchNorm).
+"""Two-stage hyperparameter sweep for a VGG-style CNN baseline (Conv+BN+ReLU
+blocks with MaxPool downsampling and a Global Average Pooling head).
 
 Stage 1: per budget tier, sample random configs from the search space,
 analytically reject those that exceed the int8 memory / op budget, and
@@ -41,24 +41,19 @@ BUDGETS: Dict[str, Dict[str, int]] = {
     "L": {"memory_bytes": 500 * 1024, "ops": 80_000_000},
 }
 
-# Hyperparameters per Hello Edge (Zhang et al. 2017) Table 4 for CNN:
-#   Number of Conv layers, features / kernel size / stride, linear layer dim, FC layer size.
+# VGG-style CNN: Conv+BN+ReLU blocks with MaxPool downsampling and GAP head.
 SEARCH_SPACE = {
-    "num_conv_layers": [1, 2],
-    "conv_filters":    [32, 48, 64, 96, 128, 186],
-    "conv_kernel":     [(3, 3), (5, 3), (10, 4), (20, 8)],
-    "first_stride":    [(1, 1), (2, 1), (1, 2), (2, 2)],
-    "pool_f":          [1, 2, 3],
-    "linear_dim":      [16, 32, 64],
-    "fc_size":         [64, 128, 256],
-    "mfcc_bins":       [10, 40],
+    "layers":    [2, 3, 4, 5],
+    "filters":   [16, 24, 32, 48, 64, 96, 128],
+    "kernel":    [(3, 3), (5, 5), (5, 3), (3, 5)],
+    "pool":      [(1, 1), (2, 1), (1, 2), (2, 2)],
+    "mfcc_bins": [10, 40],
 }
 
 CSV_COLUMNS = [
     "tier", "stage", "rank",
-    "num_conv_layers", "conv_filters",
-    "kernel_t", "kernel_f", "stride_t", "stride_f", "pool_f",
-    "linear_dim", "fc_size", "mfcc_bins",
+    "layers", "filters",
+    "kernel_t", "kernel_f", "pool_t", "pool_f", "mfcc_bins",
     "params", "weight_bytes", "act_bytes", "memory_bytes",
     "macs", "ops", "epochs", "val_accuracy",
 ]
@@ -110,41 +105,28 @@ def feature_frame_count(sample_rate: int = 16000, clip_ms: int = 1000,
 
 def sample_config(rng: random.Random) -> Dict:
     return {
-        "num_conv_layers": rng.choice(SEARCH_SPACE["num_conv_layers"]),
-        "conv_filters":    rng.choice(SEARCH_SPACE["conv_filters"]),
-        "conv_kernel":     tuple(rng.choice(SEARCH_SPACE["conv_kernel"])),
-        "first_stride":    tuple(rng.choice(SEARCH_SPACE["first_stride"])),
-        "pool_f":          rng.choice(SEARCH_SPACE["pool_f"]),
-        "linear_dim":      rng.choice(SEARCH_SPACE["linear_dim"]),
-        "fc_size":         rng.choice(SEARCH_SPACE["fc_size"]),
-        "mfcc_bins":       rng.choice(SEARCH_SPACE["mfcc_bins"]),
+        "layers":    rng.choice(SEARCH_SPACE["layers"]),
+        "filters":   rng.choice(SEARCH_SPACE["filters"]),
+        "kernel":    tuple(rng.choice(SEARCH_SPACE["kernel"])),
+        "pool":      tuple(rng.choice(SEARCH_SPACE["pool"])),
+        "mfcc_bins": rng.choice(SEARCH_SPACE["mfcc_bins"]),
     }
 
 
 def config_key(cfg: Dict) -> Tuple:
-    return (
-        cfg["num_conv_layers"], cfg["conv_filters"], cfg["conv_kernel"],
-        cfg["first_stride"], cfg["pool_f"],
-        cfg["linear_dim"], cfg["fc_size"], cfg["mfcc_bins"],
-    )
+    return (cfg["layers"], cfg["filters"], cfg["kernel"], cfg["pool"], cfg["mfcc_bins"])
 
 
 def build_candidate_model(cfg: Dict, num_classes: int) -> tf.keras.Model:
     tf.keras.backend.clear_session()
     input_shape = (feature_frame_count(), cfg["mfcc_bins"], 1)
-    # A pool factor > frequency bins would collapse the frequency axis.
-    if cfg["pool_f"] > cfg["mfcc_bins"]:
-        raise ValueError(f"pool_f={cfg['pool_f']} > mfcc_bins={cfg['mfcc_bins']}")
     return build_cnn(
         input_shape=input_shape,
         num_classes=num_classes,
-        num_conv_layers=cfg["num_conv_layers"],
-        conv_filters=cfg["conv_filters"],
-        conv_kernel=cfg["conv_kernel"],
-        first_stride=cfg["first_stride"],
-        pool_f=cfg["pool_f"],
-        linear_dim=cfg["linear_dim"],
-        fc_size=cfg["fc_size"],
+        layers=cfg["layers"],
+        filters=cfg["filters"],
+        kernel=cfg["kernel"],
+        pool=cfg["pool"],
     )
 
 
@@ -262,12 +244,9 @@ def make_csv_row(tier: str, stage: int, rank: int, cfg: Dict, cost: Dict[str, in
                  epochs: int, val_accuracy: Optional[float]) -> Dict:
     return {
         "tier": tier, "stage": stage, "rank": rank,
-        "num_conv_layers": cfg["num_conv_layers"],
-        "conv_filters": cfg["conv_filters"],
-        "kernel_t": cfg["conv_kernel"][0], "kernel_f": cfg["conv_kernel"][1],
-        "stride_t": cfg["first_stride"][0], "stride_f": cfg["first_stride"][1],
-        "pool_f": cfg["pool_f"],
-        "linear_dim": cfg["linear_dim"], "fc_size": cfg["fc_size"],
+        "layers": cfg["layers"], "filters": cfg["filters"],
+        "kernel_t": cfg["kernel"][0], "kernel_f": cfg["kernel"][1],
+        "pool_t": cfg["pool"][0], "pool_f": cfg["pool"][1],
         "mfcc_bins": cfg["mfcc_bins"],
         "params": cost["params"], "weight_bytes": cost["weight_bytes"],
         "act_bytes": cost["act_bytes"], "memory_bytes": cost["memory_bytes"],
@@ -390,14 +369,11 @@ def main() -> None:
             "tier": tier,
             "budget": budget,
             "config": {
-                "num_conv_layers": best_cfg["num_conv_layers"],
-                "conv_filters":    best_cfg["conv_filters"],
-                "conv_kernel":     list(best_cfg["conv_kernel"]),
-                "first_stride":    list(best_cfg["first_stride"]),
-                "pool_f":          best_cfg["pool_f"],
-                "linear_dim":      best_cfg["linear_dim"],
-                "fc_size":         best_cfg["fc_size"],
-                "mfcc_bins":       best_cfg["mfcc_bins"],
+                "layers":    best_cfg["layers"],
+                "filters":   best_cfg["filters"],
+                "kernel":    list(best_cfg["kernel"]),
+                "pool":      list(best_cfg["pool"]),
+                "mfcc_bins": best_cfg["mfcc_bins"],
             },
             "cost": best_cost,
             "val_accuracy": best_val,

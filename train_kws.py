@@ -128,13 +128,10 @@ def main() -> None:
             }
         elif args.model == "cnn":
             model_kwargs = {
-                "num_conv_layers": int(cfg["num_conv_layers"]),
-                "conv_filters": int(cfg["conv_filters"]),
-                "conv_kernel": tuple(cfg["conv_kernel"]),
-                "first_stride": tuple(cfg["first_stride"]),
-                "pool_f": int(cfg["pool_f"]),
-                "linear_dim": int(cfg["linear_dim"]),
-                "fc_size": int(cfg["fc_size"]),
+                "layers": int(cfg["layers"]),
+                "filters": int(cfg["filters"]),
+                "kernel": tuple(cfg["kernel"]),
+                "pool": tuple(cfg["pool"]),
             }
         else:
             raise ValueError(f"--retrain-from-sweep not supported for model={args.model}")

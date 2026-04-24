@@ -86,35 +86,41 @@ def build_cnn_one_fstride4(
 def build_cnn(
     input_shape: Tuple[int, int, int],
     num_classes: int,
-    num_conv_layers: int = 2,
-    conv_filters: int = 64,
-    conv_kernel: Tuple[int, int] = (10, 4),
-    first_stride: Tuple[int, int] = (1, 1),
-    pool_f: int = 3,
-    linear_dim: int = 32,
-    fc_size: int = 128,
+    layers: int = 3,
+    filters: int = 32,
+    kernel: Tuple[int, int] = (3, 3),
+    pool: Tuple[int, int] = (2, 2),
+    dropout: float = 0.1,
 ) -> tf.keras.Model:
-    """Sainath & Parada 2015 style CNN, stabilized with BatchNorm.
+    """VGG-style CNN with BatchNorm and Global Average Pooling head.
 
-    Matches the Hello Edge (Zhang et al. 2017) CNN hyperparameter set:
-    number of conv layers, conv features/kernel/stride, linear layer dim, FC
-    layer size. A MaxPool(1, pool_f) is applied along the frequency axis after
-    the first conv (cf. `cnn-trad-fpool3`). `first_stride` is applied to the
-    first conv layer; subsequent conv layers use stride (1, 1). `same` padding
-    is used so dimensions remain predictable across MFCC-bin settings.
+    Stacks `layers` blocks of Conv + BN + ReLU. A MaxPool with stride `pool`
+    is applied between successive conv blocks (skipped when the spatial
+    dimension would collapse below the pool size). A Global Average Pooling
+    head replaces Flatten+Dense, which avoids a large fully-connected
+    bottleneck and keeps training numerically stable. `same` padding is used
+    so pool bookkeeping is straightforward.
+
+    References: Simonyan & Zisserman 2014 (VGG 3x3 stacking), Ioffe & Szegedy
+    2015 (BatchNorm), Lin et al. 2013 (Network-in-Network / GAP head).
     """
-    if num_conv_layers < 1:
-        raise ValueError(f"num_conv_layers must be >= 1, got {num_conv_layers}")
+    if layers < 1:
+        raise ValueError(f"layers must be >= 1, got {layers}")
     inputs = tf.keras.Input(shape=input_shape, name="mfcc")
-    x = inputs
-    for i in range(num_conv_layers):
-        stride = first_stride if i == 0 else (1, 1)
-        x = conv_block(x, conv_filters, conv_kernel, strides=stride, name=f"conv{i + 1}")
-        if i == 0 and pool_f > 1:
-            x = tf.keras.layers.MaxPooling2D(pool_size=(1, pool_f), name="fpool")(x)
-    x = tf.keras.layers.Flatten(name="flatten")(x)
-    x = tf.keras.layers.Dense(linear_dim, name="linear")(x)
-    x = tf.keras.layers.Dense(fc_size, activation="relu", name="fc")(x)
+    x = conv_block(inputs, filters, kernel, name="conv1")
+    height = int(inputs.shape[1])
+    width = int(inputs.shape[2])
+    for i in range(1, layers):
+        if pool != (1, 1) and height >= pool[0] and width >= pool[1]:
+            x = tf.keras.layers.MaxPooling2D(
+                pool_size=pool, strides=pool, name=f"pool{i}"
+            )(x)
+            height //= pool[0]
+            width //= pool[1]
+        x = conv_block(x, filters, kernel, name=f"conv{i + 1}")
+        if dropout > 0:
+            x = tf.keras.layers.Dropout(dropout, name=f"conv{i + 1}_dropout")(x)
+    x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
     outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="classifier")(x)
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="cnn")
 

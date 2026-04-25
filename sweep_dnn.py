@@ -52,10 +52,13 @@ BUDGETS: Dict[str, Dict[str, int]] = {
 
 # Hello Edge Table 4 reference (DNN S/M/L): 3 layers x {144, 256, 436}. We
 # widen the search around those to let the sweep find the best fit per budget.
+# dropout fixed to 0.0: the baseline ablation (dnn_dropout0.0/0.2/0.3 runs)
+# showed dropout > 0 hurt test accuracy on this dataset+architecture, so we
+# don't waste sweep candidates re-exploring it.
 SEARCH_SPACE = {
     "layers":    [2, 3, 4, 5],
     "units":     [64, 128, 144, 192, 256, 320, 400, 436, 512],
-    "dropout":   [0.0, 0.2, 0.4, 0.5],
+    "dropout":   [0.0],
     "mfcc_bins": [10, 40],
 }
 

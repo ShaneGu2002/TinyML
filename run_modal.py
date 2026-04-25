@@ -29,10 +29,11 @@ import modal
 
 APP_NAME = "kws-dnn-sweep"
 
-# Image: Debian + Python 3.11 + TensorFlow + the repo source (mounted at /workspace).
+# Image: Debian + Python 3.11 + TensorFlow with bundled CUDA libs (so TF can
+# actually use the Modal GPU instead of falling back to CPU) + the repo source.
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("tensorflow==2.21.0", "numpy")
+    .pip_install("tensorflow[and-cuda]==2.21.0", "numpy")
     .add_local_dir(".", "/workspace")
 )
 

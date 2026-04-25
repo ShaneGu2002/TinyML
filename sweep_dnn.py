@@ -27,6 +27,16 @@ from typing import Dict, List, Optional, Tuple
 
 import tensorflow as tf
 
+# Enable memory growth so TF does not pre-allocate the entire GPU on first use.
+# Without this, the second analytic_cost / build_candidate_model call inside the
+# sweep can fail with cudaSetDevice() ... out of memory because TF's default is
+# to grab all VRAM up front and clear_session() does not release it.
+for _gpu in tf.config.list_physical_devices("GPU"):
+    try:
+        tf.config.experimental.set_memory_growth(_gpu, True)
+    except RuntimeError:
+        pass  # must be set before GPUs are initialized; ignore if already done
+
 from kws.data import DatasetConfig, build_datasets
 from kws.models import build_dnn, estimate_operations, estimate_peak_activation_bytes
 
@@ -127,7 +137,10 @@ def build_candidate_model(cfg: Dict, num_classes: int) -> tf.keras.Model:
 
 
 def analytic_cost(cfg: Dict, num_classes: int) -> Dict[str, int]:
-    model = build_candidate_model(cfg, num_classes)
+    # Counting params / MACs is purely metadata; force CPU so we don't churn
+    # GPU state for hundreds of throwaway candidate models during sampling.
+    with tf.device("/CPU:0"):
+        model = build_candidate_model(cfg, num_classes)
     weights = int(model.count_params())
     act_bytes = int(estimate_peak_activation_bytes(model, bytes_per_element=1))
     macs = int(estimate_operations(model))

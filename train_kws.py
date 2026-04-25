@@ -7,6 +7,13 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.python.framework.convert_to_constants import convert_variables_to_constants_v2
 
+# Enable memory growth so TF does not pre-allocate the entire GPU upfront.
+for _gpu in tf.config.list_physical_devices("GPU"):
+    try:
+        tf.config.experimental.set_memory_growth(_gpu, True)
+    except RuntimeError:
+        pass  # must be set before GPUs are initialized
+
 from kws.data import DatasetConfig, build_datasets
 from kws.models import build_model, estimate_operations, estimate_peak_activation_bytes
 

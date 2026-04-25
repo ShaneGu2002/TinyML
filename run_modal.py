@@ -29,10 +29,17 @@ import modal
 
 APP_NAME = "kws-dnn-sweep"
 
-# Image: Debian + Python 3.11 + TensorFlow with bundled CUDA libs (so TF can
-# actually use the Modal GPU instead of falling back to CPU) + the repo source.
+# Image: NVIDIA CUDA 12.5 base (provides libcuda.so via Modal's NVIDIA container
+# runtime hook) + Python 3.11 + TensorFlow with bundled CUDA libs (cuDNN, cuBLAS,
+# etc. matched to TF 2.21) + the repo source.
+#
+# debian_slim does NOT inherit NVIDIA's container hooks, so libcuda.so is missing
+# even when gpu="H100" is set. nvidia/cuda:*-runtime ensures that hook is wired up.
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.5.1-runtime-ubuntu22.04",
+        add_python="3.11",
+    )
     .pip_install("tensorflow[and-cuda]==2.21.0", "numpy")
     .add_local_dir(".", "/workspace")
 )

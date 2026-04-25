@@ -51,7 +51,7 @@ CACHE_DIR = "/cache/mfcc"
 SWEEP_DIR = "/artifacts/sweep_artifacts"
 RETRAIN_DIR = "/artifacts/retrained"
 
-GPU = "B200"  # premium; ~3x faster than A10 for this workload but 5-7x more expensive.
+GPU = "H100"  # high availability, ~3x faster than A10. Use "B200" only if pool isn't queued.
 
 app = modal.App(APP_NAME)
 

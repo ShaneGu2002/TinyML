@@ -51,7 +51,7 @@ CACHE_DIR = "/cache/mfcc"
 SWEEP_DIR = "/artifacts/sweep_artifacts"
 RETRAIN_DIR = "/artifacts/retrained"
 
-GPU = "A10"  # ~$1.10/hr; switch to "T4" ($0.59/hr) for cheaper but ~2x slower.
+GPU = "B200"  # premium; ~3x faster than A10 for this workload but 5-7x more expensive.
 
 app = modal.App(APP_NAME)
 

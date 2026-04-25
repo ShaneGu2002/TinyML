@@ -9,6 +9,11 @@ AR := $(RISCV_PREFIX)ar
 SPIKE ?= spike
 PK ?= /opt/homebrew/Cellar/riscv-pk/main/riscv64-unknown-elf/bin/pk
 
+# Selects which artifact directory provides `model_data.{cc,h}`.
+# Override on the command line: `make MODEL=ds_cnn` or `make MODEL=gru_M`.
+MODEL ?= gru_M
+MODEL_DIR := $(PROJECT_ROOT)/artifacts/$(MODEL)
+
 TFLM_DIR := $(PROJECT_ROOT)/third_party/tflm
 HOMEBREW_PREFIX ?= /opt/homebrew
 
@@ -21,6 +26,7 @@ LDFLAGS := -Wl,--gc-sections
 
 INCLUDES := \
 	-I$(PROJECT_ROOT) \
+	-I$(MODEL_DIR) \
 	-I$(TFLM_DIR) \
 	-I$(TFLM_DIR)/tensorflow/lite/micro/tools/make/downloads/flatbuffers/include \
 	-I$(TFLM_DIR)/tensorflow/lite/micro/tools/make/downloads/gemmlowp \
@@ -30,8 +36,7 @@ INCLUDES := \
 APP_SRCS := \
 	$(PROJECT_ROOT)/tflm_demo/main.cc \
 	$(PROJECT_ROOT)/tflm_demo/kws_inference.cc \
-	$(PROJECT_ROOT)/tflm_demo/test_input_data.cc \
-	$(PROJECT_ROOT)/artifacts/ds_cnn/model_data.cc
+	$(MODEL_DIR)/model_data.cc
 
 TFLM_MICRO_SRCS := \
 	$(TFLM_DIR)/tensorflow/compiler/mlir/lite/core/api/error_reporter.cc \
@@ -61,7 +66,10 @@ TFLM_MICRO_SRCS := \
 	$(TFLM_DIR)/tensorflow/lite/micro/tflite_bridge/micro_error_reporter.cc
 
 TFLM_KERNEL_SRCS := \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/activations.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/activations_common.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/add.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/add_common.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/conv.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/conv_common.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/depthwise_conv.cc \
@@ -72,6 +80,10 @@ TFLM_KERNEL_SRCS := \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/fully_connected_common.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/kernel_runner.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/kernel_util.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/logistic.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/logistic_common.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/mul.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/mul_common.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/quantize.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/quantize_common.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/reduce.cc \
@@ -79,13 +91,20 @@ TFLM_KERNEL_SRCS := \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/reshape.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/reshape_common.cc \
 	$(TFLM_DIR)/tensorflow/lite/micro/kernels/softmax.cc \
-	$(TFLM_DIR)/tensorflow/lite/micro/kernels/softmax_common.cc
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/softmax_common.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/split.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/strided_slice.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/strided_slice_common.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/sub.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/sub_common.cc \
+	$(TFLM_DIR)/tensorflow/lite/micro/kernels/tanh.cc
 
 TFLM_INTERNAL_SRCS := \
 	$(TFLM_DIR)/tensorflow/lite/kernels/kernel_util.cc \
 	$(TFLM_DIR)/tensorflow/lite/kernels/internal/common.cc \
 	$(TFLM_DIR)/tensorflow/lite/kernels/internal/portable_tensor_utils.cc \
 	$(TFLM_DIR)/tensorflow/lite/kernels/internal/quantization_util.cc \
+	$(TFLM_DIR)/tensorflow/lite/kernels/internal/tensor_ctypes.cc \
 	$(TFLM_DIR)/tensorflow/lite/kernels/internal/tensor_utils.cc
 
 SRCS := $(APP_SRCS) $(TFLM_MICRO_SRCS) $(TFLM_KERNEL_SRCS) $(TFLM_INTERNAL_SRCS)

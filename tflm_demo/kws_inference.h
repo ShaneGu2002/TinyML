@@ -6,23 +6,19 @@
 
 #include "tensorflow/lite/c/common.h"
 
+// `kFeatureFrames`, `kFeatureBins`, `kFeatureChannels`,
+// `kFeatureElementCount`, `kCategoryCount`, and `kCategoryLabels` are all
+// supplied by the generated `model_data.h` (one per artifact directory).
+#include "model_data.h"
+
 namespace kws {
-
-constexpr int kFeatureFrames = 49;
-constexpr int kFeatureBins = 10;
-constexpr int kFeatureChannels = 1;
-constexpr int kFeatureElementCount =
-    kFeatureFrames * kFeatureBins * kFeatureChannels;
-constexpr int kCategoryCount = 6;
-
-extern const char* kCategoryLabels[kCategoryCount];
 
 class KeywordSpottingRunner {
  public:
   KeywordSpottingRunner();
 
   TfLiteStatus Init();
-  TfLiteStatus SetInput(const int8_t* input_data, int input_bytes);
+  TfLiteStatus SetInput(const int8_t* input_data, int input_element_count);
   TfLiteStatus Invoke();
 
   const int8_t* GetOutput() const;
@@ -42,4 +38,3 @@ class KeywordSpottingRunner {
 }  // namespace kws
 
 #endif  // FINAL_PROJECT_TFLM_DEMO_KWS_INFERENCE_H_
-

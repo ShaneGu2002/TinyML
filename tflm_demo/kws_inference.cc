@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstring>
 
-#include "artifacts/ds_cnn/model_data.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_log.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
@@ -11,13 +10,13 @@
 
 namespace kws {
 
-const char* kCategoryLabels[kCategoryCount] = {
-    "yes", "no", "stop", "go", "_unknown_", "_silence_",
-};
-
 namespace {
 
-constexpr int kTensorArenaSize = 100 * 1024;
+// The unrolled GRU has ~100 FULLY_CONNECTED ops, each per-channel quantized
+// (192 multipliers/shifts -> ~1.5 KB persistent each); plus per-timestep state
+// tensors. 1 MiB is generous but the spike+pk environment has GBs of DRAM, so
+// we trade RAM for safety here.
+constexpr int kTensorArenaSize = 1024 * 1024;
 alignas(16) uint8_t g_tensor_arena[kTensorArenaSize];
 
 int ArgMax(const int8_t* values, int count) {
@@ -36,7 +35,10 @@ int ArgMax(const int8_t* values, int count) {
 
 struct KeywordSpottingRunner::Impl {
   const tflite::Model* model = nullptr;
-  tflite::MicroMutableOpResolver<9> resolver;
+  // Superset of operators required by both the DS-CNN INT8 model
+  // (CONV_2D / DEPTHWISE_CONV_2D / MEAN / …) and the unrolled GRU INT8 model
+  // (FULLY_CONNECTED / LOGISTIC / TANH / SPLIT / STRIDED_SLICE / SUB / …).
+  tflite::MicroMutableOpResolver<16> resolver;
   tflite::MicroInterpreter* interpreter = nullptr;
   TfLiteTensor* input = nullptr;
   TfLiteTensor* output = nullptr;
@@ -52,7 +54,6 @@ TfLiteStatus KeywordSpottingRunner::Init() {
     return kTfLiteError;
   }
 
-  // Start with the ops expected by this DS-CNN INT8 model.
   if (impl_->resolver.AddConv2D() != kTfLiteOk ||
       impl_->resolver.AddDepthwiseConv2D() != kTfLiteOk ||
       impl_->resolver.AddFullyConnected() != kTfLiteOk ||
@@ -60,7 +61,14 @@ TfLiteStatus KeywordSpottingRunner::Init() {
       impl_->resolver.AddReshape() != kTfLiteOk ||
       impl_->resolver.AddSoftmax() != kTfLiteOk ||
       impl_->resolver.AddQuantize() != kTfLiteOk ||
-      impl_->resolver.AddDequantize() != kTfLiteOk) {
+      impl_->resolver.AddDequantize() != kTfLiteOk ||
+      impl_->resolver.AddAdd() != kTfLiteOk ||
+      impl_->resolver.AddMul() != kTfLiteOk ||
+      impl_->resolver.AddSub() != kTfLiteOk ||
+      impl_->resolver.AddLogistic() != kTfLiteOk ||
+      impl_->resolver.AddTanh() != kTfLiteOk ||
+      impl_->resolver.AddSplit() != kTfLiteOk ||
+      impl_->resolver.AddStridedSlice() != kTfLiteOk) {
     MicroPrintf("Failed to register one or more operators.");
     return kTfLiteError;
   }
@@ -80,30 +88,40 @@ TfLiteStatus KeywordSpottingRunner::Init() {
 
   impl_->input = impl_->interpreter->input(0);
   impl_->output = impl_->interpreter->output(0);
-
-  if (impl_->input->type != kTfLiteInt8) {
-    MicroPrintf("Expected INT8 input tensor.");
-    return kTfLiteError;
-  }
-  if (impl_->output->type != kTfLiteInt8) {
-    MicroPrintf("Expected INT8 output tensor.");
-    return kTfLiteError;
-  }
-
   return kTfLiteOk;
 }
 
 TfLiteStatus KeywordSpottingRunner::SetInput(const int8_t* input_data,
-                                             int input_bytes) {
+                                             int input_element_count) {
   if (impl_->input == nullptr) {
     return kTfLiteError;
   }
-  if (input_bytes != impl_->input->bytes) {
-    MicroPrintf("Input byte count mismatch. Expected %d, got %d.",
-                impl_->input->bytes, input_bytes);
+  // The DS-CNN model takes int8 input; the GRU model keeps a float32 input
+  // (the converter inserts an explicit QUANTIZE op). Handle both, but the
+  // public ABI is always "int8 MFCC samples, kFeatureElementCount of them".
+  if (impl_->input->type == kTfLiteInt8) {
+    if (input_element_count != impl_->input->bytes) {
+      MicroPrintf("Input element count mismatch. Expected %d, got %d.",
+                  impl_->input->bytes, input_element_count);
+      return kTfLiteError;
+    }
+    std::memcpy(impl_->input->data.int8, input_data, input_element_count);
+  } else if (impl_->input->type == kTfLiteFloat32) {
+    const int expected_elements =
+        static_cast<int>(impl_->input->bytes / sizeof(float));
+    if (input_element_count != expected_elements) {
+      MicroPrintf("Input element count mismatch. Expected %d, got %d.",
+                  expected_elements, input_element_count);
+      return kTfLiteError;
+    }
+    float* dst = impl_->input->data.f;
+    for (int i = 0; i < input_element_count; ++i) {
+      dst[i] = static_cast<float>(input_data[i]) / 128.0f;
+    }
+  } else {
+    MicroPrintf("Unsupported input tensor type: %d", impl_->input->type);
     return kTfLiteError;
   }
-  std::memcpy(impl_->input->data.int8, input_data, input_bytes);
   return kTfLiteOk;
 }
 
@@ -123,6 +141,15 @@ int KeywordSpottingRunner::GetOutputBytes() const {
 }
 
 int KeywordSpottingRunner::GetTopCategory() const {
+  if (impl_->output == nullptr) return 0;
+  if (impl_->output->type == kTfLiteFloat32) {
+    const float* values = impl_->output->data.f;
+    int best = 0;
+    for (int i = 1; i < kCategoryCount; ++i) {
+      if (values[i] > values[best]) best = i;
+    }
+    return best;
+  }
   return ArgMax(GetOutput(), kCategoryCount);
 }
 

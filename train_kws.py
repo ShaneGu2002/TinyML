@@ -16,8 +16,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
     parser.add_argument(
         "--model",
-        choices=["cnn_trad_fpool3", "cnn_one_fstride4", "ds_cnn"],
+        choices=["cnn_trad_fpool3", "cnn_one_fstride4", "ds_cnn", "gru"],
         default="ds_cnn",
+    )
+    parser.add_argument(
+        "--gru-units",
+        type=int,
+        default=64,
+        help="Hidden units for the GRU model (only used when --model gru).",
     )
     parser.add_argument(
         "--keywords",
@@ -54,19 +60,27 @@ def representative_dataset(dataset: tf.data.Dataset, limit: int):
 
 
 def evaluate_tflite(tflite_path: Path, dataset: tf.data.Dataset) -> float:
-    """Run the int8 TFLite model sample-by-sample and return top-1 accuracy."""
+    """Run the TFLite model sample-by-sample and return top-1 accuracy.
+
+    Handles both pure-INT8 inputs and float32 inputs (used when sequence ops
+    fall back to float in the converter).
+    """
     interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
     interpreter.allocate_tensors()
     in_det = interpreter.get_input_details()[0]
     out_det = interpreter.get_output_details()[0]
     in_scale, in_zp = in_det["quantization"]
+    in_dtype = in_det["dtype"]
 
     correct, total = 0, 0
     for features, labels in dataset.unbatch().batch(1):
         x = features.numpy().astype(np.float32)
-        if in_scale > 0:
-            x = np.round(x / in_scale + in_zp)
-        x = np.clip(x, np.iinfo(in_det["dtype"]).min, np.iinfo(in_det["dtype"]).max).astype(in_det["dtype"])
+        if np.issubdtype(in_dtype, np.integer):
+            if in_scale > 0:
+                x = np.round(x / in_scale + in_zp)
+            x = np.clip(x, np.iinfo(in_dtype).min, np.iinfo(in_dtype).max).astype(in_dtype)
+        else:
+            x = x.astype(in_dtype)
         interpreter.set_tensor(in_det["index"], x)
         interpreter.invoke()
         pred = interpreter.get_tensor(out_det["index"])
@@ -80,16 +94,28 @@ def export_int8_tflite(
     validation_dataset: tf.data.Dataset,
     output_path: Path,
     rep_samples: int,
+    allow_float_fallback: bool = False,
 ) -> Path:
     input_shape = (1,) + tuple(model.input_shape[1:])
     concrete_func = tf.function(model).get_concrete_function(tf.TensorSpec(input_shape, tf.float32))
     frozen_func = convert_variables_to_constants_v2(concrete_func)
     converter = tf.lite.TFLiteConverter.from_concrete_functions([frozen_func])
+    converter.experimental_enable_resource_variables = True
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
     converter.representative_dataset = lambda: representative_dataset(validation_dataset, rep_samples)
-    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    converter.inference_input_type = tf.int8
-    converter.inference_output_type = tf.int8
+    if allow_float_fallback:
+        # Some sequence ops (e.g. GRU/LSTM) lack a pure-INT8 kernel; allow the converter
+        # to keep them in float while still quantizing every other op.
+        converter.target_spec.supported_ops = [
+            tf.lite.OpsSet.TFLITE_BUILTINS_INT8,
+            tf.lite.OpsSet.TFLITE_BUILTINS,
+        ]
+        converter.inference_input_type = tf.float32
+        converter.inference_output_type = tf.float32
+    else:
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+        converter.inference_input_type = tf.int8
+        converter.inference_output_type = tf.int8
     tflite_model = converter.convert()
     output_path.write_bytes(tflite_model)
     return output_path
@@ -113,7 +139,15 @@ def main() -> None:
     )
 
     datasets, splits, input_shape = build_datasets(config)
-    model = build_model(args.model, input_shape=input_shape, num_classes=len(config.labels))
+    model_kwargs = {}
+    if args.model == "gru":
+        model_kwargs["gru_units"] = args.gru_units
+    model = build_model(
+        args.model,
+        input_shape=input_shape,
+        num_classes=len(config.labels),
+        **model_kwargs,
+    )
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=args.learning_rate),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(),
@@ -192,6 +226,7 @@ def main() -> None:
             validation_dataset=datasets["val"],
             output_path=output_dir / "model_int8.tflite",
             rep_samples=args.representative_samples,
+            allow_float_fallback=(args.model == "gru"),
         )
         report["int8_tflite_size_bytes"] = tflite_path.stat().st_size
         print("Evaluating int8 TFLite on train/val/test …")

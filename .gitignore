@@ -19,6 +19,7 @@ artifacts/
 
 # Cached MFCC features (produced by --cache-dir)
 sweep_cache/
+.mfcc_cache/
 
 # Local datasets
 speech-commands-v2/

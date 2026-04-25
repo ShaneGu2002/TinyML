@@ -97,13 +97,85 @@ def build_ds_cnn(
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="ds_cnn")
 
 
-def build_model(model_name: str, input_shape: Tuple[int, int, int], num_classes: int) -> tf.keras.Model:
+class SharedGRUUnroll(tf.keras.layers.Layer):
+    """A statically-unrolled GRU that reuses a single `GRUCell` across timesteps.
+
+    We build the recurrence with a Python `for` loop and a *single* shared
+    `GRUCell` instance. This sidesteps two TFLite conversion landmines:
+      * `tf.keras.layers.GRU` on Apple Metal / CUDA gets fused into the opaque
+        `CudnnRNNV3` op, which the TFLite converter cannot ingest.
+      * `tf.keras.layers.GRU(unroll=True)` re-instantiates the kernel/bias
+        tensors per timestep in the frozen graph, blowing the int8 .tflite
+        file up by ~T×.
+    Reusing the cell keeps variables shared and produces a compact, fully
+    quantizable Dense + element-wise graph.
+    """
+
+    def __init__(self, units: int, time_steps: int, **kwargs):
+        super().__init__(**kwargs)
+        self.units = units
+        self.time_steps = time_steps
+        self.cell = tf.keras.layers.GRUCell(units, reset_after=True, name="gru_cell")
+
+    def call(self, inputs: tf.Tensor) -> tf.Tensor:
+        batch_size = tf.shape(inputs)[0]
+        state = tf.zeros((batch_size, self.units), dtype=inputs.dtype)
+        for t in range(self.time_steps):
+            state, _ = self.cell(inputs[:, t, :], [state])
+        return state
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"units": self.units, "time_steps": self.time_steps})
+        return config
+
+
+def build_gru(
+    input_shape: Tuple[int, int, int],
+    num_classes: int,
+    gru_units: int = 64,
+) -> tf.keras.Model:
+    """Single-layer GRU classifier over MFCC time-frequency frames.
+
+    Input is the MFCC tensor `(time, freq, 1)`; we squeeze the trailing
+    channel dim and feed `(time, freq)` to the GRU as a sequence.
+    """
+    inputs = tf.keras.Input(shape=input_shape, name="mfcc")
+    time_steps, feature_bins = input_shape[0], input_shape[1]
+    x = tf.keras.layers.Reshape((time_steps, feature_bins), name="squeeze")(inputs)
+    # See `SharedGRUUnroll` for why we hand-unroll instead of using `keras.layers.GRU`.
+    state = SharedGRUUnroll(gru_units, time_steps, name="gru")(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="classifier")(state)
+    return tf.keras.Model(inputs=inputs, outputs=outputs, name=f"gru_{gru_units}")
+
+
+def get_gru_model(
+    input_shape: Tuple[int, int, int],
+    num_classes: int,
+    gru_units: int = 64,
+) -> tf.keras.Model:
+    """Public alias kept for backwards-compat with the project spec."""
+    return build_gru(input_shape=input_shape, num_classes=num_classes, gru_units=gru_units)
+
+
+def build_model(
+    model_name: str,
+    input_shape: Tuple[int, int, int],
+    num_classes: int,
+    **kwargs,
+) -> tf.keras.Model:
     if model_name == "cnn_trad_fpool3":
         return build_cnn_trad_fpool3(input_shape=input_shape, num_classes=num_classes)
     if model_name == "cnn_one_fstride4":
         return build_cnn_one_fstride4(input_shape=input_shape, num_classes=num_classes)
     if model_name == "ds_cnn":
         return build_ds_cnn(input_shape=input_shape, num_classes=num_classes)
+    if model_name == "gru":
+        return build_gru(
+            input_shape=input_shape,
+            num_classes=num_classes,
+            gru_units=int(kwargs.get("gru_units", 64)),
+        )
     raise ValueError(f"Unsupported model_name: {model_name}")
 
 
@@ -134,6 +206,14 @@ def estimate_operations(model: tf.keras.Model) -> int:
             ic = layer.input.shape[-1]
             oc = out_shape[-1]
             total_macs += ic * oc
+        elif isinstance(layer, tf.keras.layers.GRU):
+            input_shape = layer.input.shape
+            time_steps = input_shape[1]
+            input_dim = input_shape[-1]
+            units = layer.units
+            if time_steps is not None and input_dim is not None:
+                # 3 gates: input->hidden (input_dim*units) and hidden->hidden (units*units), per timestep.
+                total_macs += time_steps * 3 * (input_dim * units + units * units)
     return int(total_macs)
 
 

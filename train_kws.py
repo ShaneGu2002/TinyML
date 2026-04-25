@@ -53,16 +53,6 @@ def parse_args() -> argparse.Namespace:
             "Output dir becomes <model>_<tier>_retrained."
         ),
     )
-    parser.add_argument(
-        "--dropout",
-        type=float,
-        default=None,
-        help=(
-            "Override the model builder's dropout rate. When omitted, each builder uses "
-            "its own default (dnn=0.5, cnn=0.1, ds_cnn=0.15). Silently ignored by builders "
-            "that do not accept a dropout kwarg (cnn_trad_fpool3, cnn_one_fstride4)."
-        ),
-    )
     return parser.parse_args()
 
 

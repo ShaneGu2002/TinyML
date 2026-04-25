@@ -130,7 +130,7 @@ def build_dnn(
     num_classes: int,
     layers: int = 3,
     units: int = 144,
-    dropout: float = 0.3,
+    dropout: float = 0.0,
 ) -> tf.keras.Model:
     """Hello Edge style fully-connected DNN (Appendix A, Table 4).
 

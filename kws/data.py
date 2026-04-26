@@ -248,6 +248,8 @@ def _load_background_noise_paths(config: DatasetConfig) -> List[str]:
 
 
 def _build_noise_dataset(config: DatasetConfig) -> Optional[tf.data.Dataset]:
+    if config.background_noise_prob <= 0:
+        return None
     noise_paths = _load_background_noise_paths(config)
     if not noise_paths:
         return None

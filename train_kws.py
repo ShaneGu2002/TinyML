@@ -1,10 +1,18 @@
 import argparse
 import json
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.framework.convert_to_constants import convert_variables_to_constants_v2
+
+# Enable memory growth so TF does not pre-allocate the entire GPU upfront.
+for _gpu in tf.config.list_physical_devices("GPU"):
+    try:
+        tf.config.experimental.set_memory_growth(_gpu, True)
+    except RuntimeError:
+        pass  # must be set before GPUs are initialized
 
 from kws.data import DatasetConfig, build_datasets
 from kws.models import build_model, estimate_operations, estimate_peak_activation_bytes
@@ -16,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
     parser.add_argument(
         "--model",
-        choices=["cnn_trad_fpool3", "cnn_one_fstride4", "ds_cnn"],
+        choices=["cnn_trad_fpool3", "cnn_one_fstride4", "cnn", "ds_cnn", "dnn"],
         default="ds_cnn",
     )
     parser.add_argument(
@@ -36,10 +44,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-int8", action="store_true")
     parser.add_argument("--representative-samples", type=int, default=200)
     parser.add_argument(
+        "--int8-eval-test-only",
+        action="store_true",
+        help="When set, skip int8 train/val accuracy evaluation and only run the "
+             "int8 test set. evaluate_tflite() runs sample-by-sample so the train "
+             "split (~62k samples) takes ~5 min per model; for sweep retrain we "
+             "only need int8 test accuracy.",
+    )
+    parser.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
         help="Directory for caching preprocessed MFCC features. Huge speedup on repeated training.",
+    )
+    parser.add_argument(
+        "--retrain-from-sweep",
+        type=Path,
+        default=None,
+        help=(
+            "Retrain a swept model: load architecture hyperparameters and MFCC bin "
+            "count from a sweep report.json (e.g. sweep_artifacts/ds_cnn_S/report.json "
+            "or sweep_artifacts/cnn_S/report.json). --model is taken from the report. "
+            "Output dir becomes <model>_<tier>_retrained."
+        ),
     )
     return parser.parse_args()
 
@@ -99,6 +126,40 @@ def main() -> None:
     args = parse_args()
     tf.keras.utils.set_random_seed(args.seed)
 
+    model_kwargs: dict = {}
+    mfcc_bins = 40
+    sweep_tier: Optional[str] = None
+    if args.retrain_from_sweep is not None:
+        report = json.loads(args.retrain_from_sweep.read_text())
+        cfg = report["config"]
+        args.model = report.get("model", "ds_cnn")
+        mfcc_bins = int(cfg["mfcc_bins"])
+        if args.model == "ds_cnn":
+            model_kwargs = {
+                "layers": int(cfg["layers"]),
+                "filters": int(cfg["filters"]),
+                "kernel": tuple(cfg["kernel"]),
+                "first_stride": tuple(cfg["first_stride"]),
+            }
+        elif args.model == "cnn":
+            model_kwargs = {
+                "layers": int(cfg["layers"]),
+                "filters": int(cfg["filters"]),
+                "kernel": tuple(cfg["kernel"]),
+                "pool": tuple(cfg["pool"]),
+            }
+        elif args.model == "dnn":
+            model_kwargs = {
+                "layers": int(cfg["layers"]),
+                "units": int(cfg["units"]),
+                "dropout": float(cfg.get("dropout", 0.0)),
+            }
+        else:
+            raise ValueError(f"--retrain-from-sweep not supported for model={args.model}")
+        sweep_tier = report.get("tier")
+        print(f"Loaded sweep config (model={args.model}, tier={sweep_tier}): "
+              f"mfcc_bins={mfcc_bins}, {model_kwargs}")
+
     config = DatasetConfig(
         data_dir=args.data_dir,
         keywords=args.keywords,
@@ -110,17 +171,25 @@ def main() -> None:
         max_val_samples=args.max_val_samples,
         max_test_samples=args.max_test_samples,
         cache_dir=args.cache_dir,
+        feature_bins=mfcc_bins,
+        mel_bins=mfcc_bins,
     )
 
     datasets, splits, input_shape = build_datasets(config)
-    model = build_model(args.model, input_shape=input_shape, num_classes=len(config.labels))
+    model = build_model(
+        args.model,
+        input_shape=input_shape,
+        num_classes=len(config.labels),
+        **model_kwargs,
+    )
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=args.learning_rate),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(),
         metrics=["accuracy"],
     )
 
-    output_dir = args.output_dir / args.model
+    out_subdir = f"{args.model}_{sweep_tier}_retrained" if sweep_tier else args.model
+    output_dir = args.output_dir / out_subdir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     callbacks = [
@@ -194,10 +263,14 @@ def main() -> None:
             rep_samples=args.representative_samples,
         )
         report["int8_tflite_size_bytes"] = tflite_path.stat().st_size
-        print("Evaluating int8 TFLite on train/val/test …")
-        report["int8_train_accuracy"] = evaluate_tflite(tflite_path, datasets["train"])
-        report["int8_val_accuracy"] = evaluate_tflite(tflite_path, datasets["val"])
-        report["int8_test_accuracy"] = evaluate_tflite(tflite_path, datasets["test"])
+        if args.int8_eval_test_only:
+            print("Evaluating int8 TFLite on test only …")
+            report["int8_test_accuracy"] = evaluate_tflite(tflite_path, datasets["test"])
+        else:
+            print("Evaluating int8 TFLite on train/val/test …")
+            report["int8_train_accuracy"] = evaluate_tflite(tflite_path, datasets["train"])
+            report["int8_val_accuracy"] = evaluate_tflite(tflite_path, datasets["val"])
+            report["int8_test_accuracy"] = evaluate_tflite(tflite_path, datasets["test"])
 
     with (output_dir / "report.json").open("w") as report_file:
         json.dump(report, report_file, indent=2)

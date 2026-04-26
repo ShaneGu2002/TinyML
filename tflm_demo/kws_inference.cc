@@ -3,16 +3,24 @@
 #include <cstdint>
 #include <cstring>
 
-#include "artifacts/ds_cnn/model_data.h"
+// Build system (Makefile) passes -DKWS_MODEL_DATA_HEADER="\"<path>\"" so the
+// deployed model can be swapped via MODEL_DIR without editing source.
+#ifndef KWS_MODEL_DATA_HEADER
+#define KWS_MODEL_DATA_HEADER "artifacts/ds_cnn/model_data.h"
+#endif
+#include KWS_MODEL_DATA_HEADER
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_log.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/micro_profiler.h"
 #include "tensorflow/lite/schema/schema_generated.h"
+#include "tflm_demo/kernels/kws_kernels.h"
 
 namespace kws {
 
 const char* kCategoryLabels[kCategoryCount] = {
-    "yes", "no", "stop", "go", "_unknown_", "_silence_",
+    "yes", "no", "up", "down", "left", "right",
+    "on", "off", "stop", "go", "_unknown_", "_silence_",
 };
 
 namespace {
@@ -37,6 +45,7 @@ int ArgMax(const int8_t* values, int count) {
 struct KeywordSpottingRunner::Impl {
   const tflite::Model* model = nullptr;
   tflite::MicroMutableOpResolver<9> resolver;
+  tflite::MicroProfiler profiler;
   tflite::MicroInterpreter* interpreter = nullptr;
   TfLiteTensor* input = nullptr;
   TfLiteTensor* output = nullptr;
@@ -52,10 +61,16 @@ TfLiteStatus KeywordSpottingRunner::Init() {
     return kTfLiteError;
   }
 
-  // Start with the ops expected by this DS-CNN INT8 model.
-  if (impl_->resolver.AddConv2D() != kTfLiteOk ||
-      impl_->resolver.AddDepthwiseConv2D() != kTfLiteOk ||
-      impl_->resolver.AddFullyConnected() != kTfLiteOk ||
+  // Conv2D / DepthwiseConv2D / FullyConnected are routed through our custom
+  // int8 invoke kernels (ref | opt | rvv). Init and Prepare stay on TFLM's
+  // default paths so per-channel multiplier/shift setup is unchanged.
+  MicroPrintf("KWS kernel variant: %s", kws_kernels::KernelVariantName());
+  if (impl_->resolver.AddConv2D(kws_kernels::GetConvInt8Registration()) !=
+          kTfLiteOk ||
+      impl_->resolver.AddDepthwiseConv2D(
+          kws_kernels::GetDepthwiseConvInt8Registration()) != kTfLiteOk ||
+      impl_->resolver.AddFullyConnected(
+          kws_kernels::GetFullyConnectedInt8Registration()) != kTfLiteOk ||
       impl_->resolver.AddMean() != kTfLiteOk ||
       impl_->resolver.AddReshape() != kTfLiteOk ||
       impl_->resolver.AddSoftmax() != kTfLiteOk ||
@@ -66,7 +81,8 @@ TfLiteStatus KeywordSpottingRunner::Init() {
   }
 
   static tflite::MicroInterpreter static_interpreter(
-      impl_->model, impl_->resolver, g_tensor_arena, kTensorArenaSize);
+      impl_->model, impl_->resolver, g_tensor_arena, kTensorArenaSize,
+      /*resource_variables=*/nullptr, &impl_->profiler);
   impl_->interpreter = &static_interpreter;
 
   if (impl_->interpreter->AllocateTensors() != kTfLiteOk) {
@@ -142,6 +158,15 @@ size_t KeywordSpottingRunner::GetArenaUsedBytes() const {
 
 int KeywordSpottingRunner::GetInputBytes() const {
   return impl_->input == nullptr ? 0 : impl_->input->bytes;
+}
+
+void KeywordSpottingRunner::ResetProfiler() {
+  impl_->profiler.ClearEvents();
+}
+
+void KeywordSpottingRunner::DumpProfilerCsv() const {
+  impl_->profiler.LogCsv();
+  impl_->profiler.LogTicksPerTagCsv();
 }
 
 }  // namespace kws

@@ -32,6 +32,14 @@ def parse_args() -> argparse.Namespace:
         default="npy",
         help="Output serialization format.",
     )
+    parser.add_argument(
+        "--mfcc-bins",
+        type=int,
+        default=40,
+        help="Number of MFCC feature bins to keep (and mel bins to compute). "
+        "Must match the model the --model .tflite was trained against; "
+        "DS-CNN M from the sweep uses 10.",
+    )
     return parser.parse_args()
 
 
@@ -115,9 +123,10 @@ def write_output(output_path: Path, array: np.ndarray, output_format: str) -> No
     if output_format == "c_array":
         flattened = array.reshape(-1)
         values = ", ".join(str(int(v)) for v in flattened)
+        # `extern` forces external linkage (C++ defaults const to internal).
         content = (
             "#include <stdint.h>\n\n"
-            f"const int8_t g_example_mfcc[{flattened.size}] = {{\n  {values}\n}};\n"
+            f"extern const int8_t g_example_mfcc[{flattened.size}] = {{\n  {values}\n}};\n"
         )
         output_path.write_text(content)
         return
@@ -127,7 +136,12 @@ def write_output(output_path: Path, array: np.ndarray, output_format: str) -> No
 
 def main() -> None:
     args = parse_args()
-    config = DatasetConfig(data_dir=Path("speech-commands-v2"), keywords=["yes", "no", "stop", "go"])
+    config = DatasetConfig(
+        data_dir=Path("speech-commands-v2"),
+        keywords=["yes", "no", "stop", "go"],
+        feature_bins=args.mfcc_bins,
+        mel_bins=args.mfcc_bins,
+    )
 
     audio = decode_audio(args.wav)
     audio = slice_or_pad(audio, config.desired_samples)

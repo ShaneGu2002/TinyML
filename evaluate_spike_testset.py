@@ -48,6 +48,13 @@ def parse_args() -> argparse.Namespace:
         help="Spike executable.",
     )
     parser.add_argument(
+        "--isa",
+        type=str,
+        default="rv64gc_zicntr_zihpm",
+        help="ISA string passed to spike. Use rv64gcv_zicntr_zihpm when the ELF "
+        "was built with KERNEL=rvv (rv64gcv target).",
+    )
+    parser.add_argument(
         "--pk",
         type=Path,
         default=Path("/opt/homebrew/Cellar/riscv-pk/main/riscv64-unknown-elf/bin/pk"),
@@ -86,8 +93,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--keywords",
         nargs="+",
-        default=["yes", "no", "stop", "go"],
+        default=["yes", "no", "up", "down", "left", "right", "on", "off", "stop", "go"],
         help="Target keywords. Must match the trained model.",
+    )
+    parser.add_argument(
+        "--mfcc-bins",
+        type=int,
+        default=40,
+        help="MFCC feature bins (match the model; DS-CNN M uses 10).",
     )
     return parser.parse_args()
 
@@ -128,8 +141,8 @@ def build_quantized_input(
     return np.expand_dims(quantized, axis=0)
 
 
-def run_spike(spike: str, pk: Path, elf: Path, input_path: Path) -> Tuple[str, int, int, str]:
-    command = [spike, str(pk), str(elf), str(input_path)]
+def run_spike(spike: str, isa: str, pk: Path, elf: Path, input_path: Path) -> Tuple[str, int, int, str]:
+    command = [spike, f"--isa={isa}", str(pk), str(elf), str(input_path)]
     completed = subprocess.run(command, check=True, capture_output=True, text=True)
     output = (completed.stdout or "") + (completed.stderr or "")
     match = RESULT_RE.search(output)
@@ -149,7 +162,12 @@ def ensure_parent(path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    config = DatasetConfig(data_dir=args.data_dir, keywords=args.keywords)
+    config = DatasetConfig(
+        data_dir=args.data_dir,
+        keywords=args.keywords,
+        feature_bins=args.mfcc_bins,
+        mel_bins=args.mfcc_bins,
+    )
     splits = build_file_index(config)
     test_examples = splits["test"]
 
@@ -180,7 +198,7 @@ def main() -> None:
             quantized.reshape(-1).tofile(temp_input)
 
             predicted_label, predicted_index, predicted_score, raw_output = run_spike(
-                args.spike, args.pk, args.elf, temp_input
+                args.spike, args.isa, args.pk, args.elf, temp_input
             )
             correct = predicted_label == true_label
 

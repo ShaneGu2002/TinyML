@@ -1,4 +1,4 @@
-from typing import Iterable, Optional, Tuple
+from typing import Optional, Tuple
 
 import tensorflow as tf
 
@@ -83,27 +83,114 @@ def build_cnn_one_fstride4(
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="cnn_one_fstride4")
 
 
+def build_cnn(
+    input_shape: Tuple[int, int, int],
+    num_classes: int,
+    layers: int = 3,
+    filters: int = 32,
+    kernel: Tuple[int, int] = (3, 3),
+    pool: Tuple[int, int] = (2, 2),
+    dropout: float = 0.1,
+) -> tf.keras.Model:
+    """VGG-style CNN with BatchNorm and Global Average Pooling head.
+
+    Stacks `layers` blocks of Conv + BN + ReLU. A MaxPool with stride `pool`
+    is applied between successive conv blocks (skipped when the spatial
+    dimension would collapse below the pool size). A Global Average Pooling
+    head replaces Flatten+Dense, which avoids a large fully-connected
+    bottleneck and keeps training numerically stable. `same` padding is used
+    so pool bookkeeping is straightforward.
+
+    References: Simonyan & Zisserman 2014 (VGG 3x3 stacking), Ioffe & Szegedy
+    2015 (BatchNorm), Lin et al. 2013 (Network-in-Network / GAP head).
+    """
+    if layers < 1:
+        raise ValueError(f"layers must be >= 1, got {layers}")
+    inputs = tf.keras.Input(shape=input_shape, name="mfcc")
+    x = conv_block(inputs, filters, kernel, name="conv1")
+    height = int(inputs.shape[1])
+    width = int(inputs.shape[2])
+    for i in range(1, layers):
+        if pool != (1, 1) and height >= pool[0] and width >= pool[1]:
+            x = tf.keras.layers.MaxPooling2D(
+                pool_size=pool, strides=pool, name=f"pool{i}"
+            )(x)
+            height //= pool[0]
+            width //= pool[1]
+        x = conv_block(x, filters, kernel, name=f"conv{i + 1}")
+        if dropout > 0:
+            x = tf.keras.layers.Dropout(dropout, name=f"conv{i + 1}_dropout")(x)
+    x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="classifier")(x)
+    return tf.keras.Model(inputs=inputs, outputs=outputs, name="cnn")
+
+
+def build_dnn(
+    input_shape: Tuple[int, int, int],
+    num_classes: int,
+    layers: int = 3,
+    units: int = 144,
+    dropout: float = 0.0,
+) -> tf.keras.Model:
+    """Hello Edge style fully-connected DNN (Appendix A, Table 4).
+
+    Flatten -> (Dense + ReLU [+ Dropout]) x `layers` -> Dense softmax.
+    No BatchNorm, matching the paper's baseline. `dropout=0` disables it.
+    """
+    if layers < 1:
+        raise ValueError(f"layers must be >= 1, got {layers}")
+    inputs = tf.keras.Input(shape=input_shape, name="mfcc")
+    x = tf.keras.layers.Flatten(name="flatten")(inputs)
+    for i in range(1, layers + 1):
+        x = tf.keras.layers.Dense(units, activation="relu", name=f"fc{i}")(x)
+        if dropout > 0:
+            x = tf.keras.layers.Dropout(dropout, name=f"fc{i}_dropout")(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="classifier")(x)
+    return tf.keras.Model(inputs=inputs, outputs=outputs, name="dnn")
+
+
 def build_ds_cnn(
     input_shape: Tuple[int, int, int],
     num_classes: int,
-    ds_filters: Iterable[int] = (64, 64, 64, 64),
+    layers: int = 5,
+    filters: int = 64,
+    kernel: Tuple[int, int] = (3, 3),
+    first_stride: Tuple[int, int] = (2, 2),
+    dropout: float = 0.15,
 ) -> tf.keras.Model:
+    """Hello Edge style DS-CNN.
+
+    `layers` is the total number of conv layers: 1 regular conv stem (with
+    `first_stride`) plus `layers - 1` depthwise-separable conv blocks. All
+    conv layers share the same `kernel` and `filters`.
+    """
+    if layers < 1:
+        raise ValueError(f"layers must be >= 1, got {layers}")
     inputs = tf.keras.Input(shape=input_shape, name="mfcc")
-    x = conv_block(inputs, 64, (3, 3), strides=(2, 2), name="stem")
-    for index, filters in enumerate(ds_filters, start=1):
-        x = ds_conv_block(x, filters, dropout=0.15, name=f"ds_block{index}")
+    x = conv_block(inputs, filters, kernel, strides=first_stride, name="stem")
+    for index in range(1, layers):
+        x = ds_conv_block(x, filters, kernel_size=kernel, dropout=dropout, name=f"ds_block{index}")
     x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
     outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="classifier")(x)
     return tf.keras.Model(inputs=inputs, outputs=outputs, name="ds_cnn")
 
 
-def build_model(model_name: str, input_shape: Tuple[int, int, int], num_classes: int) -> tf.keras.Model:
+def build_model(
+    model_name: str,
+    input_shape: Tuple[int, int, int],
+    num_classes: int,
+    **kwargs,
+) -> tf.keras.Model:
     if model_name == "cnn_trad_fpool3":
         return build_cnn_trad_fpool3(input_shape=input_shape, num_classes=num_classes)
     if model_name == "cnn_one_fstride4":
         return build_cnn_one_fstride4(input_shape=input_shape, num_classes=num_classes)
+    if model_name == "cnn":
+        return build_cnn(input_shape=input_shape, num_classes=num_classes, **kwargs)
     if model_name == "ds_cnn":
-        return build_ds_cnn(input_shape=input_shape, num_classes=num_classes)
+        return build_ds_cnn(input_shape=input_shape, num_classes=num_classes, **kwargs)
+    if model_name == "dnn":
+        return build_dnn(input_shape=input_shape, num_classes=num_classes, **kwargs)
     raise ValueError(f"Unsupported model_name: {model_name}")
 
 

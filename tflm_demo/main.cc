@@ -2,6 +2,8 @@
 #include <cstdio>
 
 #include "tensorflow/lite/micro/micro_log.h"
+#include "tflm_demo/bench/cycle_counter.h"
+#include "tflm_demo/kernels/kws_kernels.h"
 #include "tflm_demo/kws_inference.h"
 #include "tflm_demo/test_input_data.h"
 
@@ -51,7 +53,12 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (runner.Invoke() != kTfLiteOk) {
+  runner.ResetProfiler();
+  const kws::Cycles pre = kws::ReadCycles();
+  const TfLiteStatus status = runner.Invoke();
+  const kws::Cycles post = kws::ReadCycles();
+
+  if (status != kTfLiteOk) {
     MicroPrintf("Model invocation failed.");
     return 1;
   }
@@ -66,5 +73,20 @@ int main(int argc, char** argv) {
               static_cast<unsigned>(runner.GetArenaUsedBytes()),
               static_cast<unsigned>(runner.GetArenaSize()),
               runner.GetInputBytes(), runner.GetOutputBytes());
+
+  // Machine-readable bench line; keys match across variants for easy diff.
+  const uint64_t d_cycle = post.cycle - pre.cycle;
+  const uint64_t d_instret = post.instret - pre.instret;
+  MicroPrintf(
+      "BENCH variant=%s invoke_cycles=%llu invoke_instret=%llu "
+      "top_index=%d top_score=%d",
+      kws_kernels::KernelVariantName(),
+      static_cast<unsigned long long>(d_cycle),
+      static_cast<unsigned long long>(d_instret), output_index,
+      static_cast<int>(output[output_index]));
+
+  // Per-op profiler table: prints one CSV row per op event + a per-tag summary
+  // so we can attribute speedup to Conv2D / DepthwiseConv2D / FullyConnected.
+  runner.DumpProfilerCsv();
   return 0;
 }

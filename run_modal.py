@@ -127,6 +127,7 @@ def retrain_tier(tier: str) -> None:
         "--output-dir", RETRAIN_DIR,
         "--epochs", "30",
         "--export-int8",
+        "--int8-eval-test-only",  # skip int8 train/val eval (slow, not needed for top table)
     ]
     print(f"=== Retrain DNN tier {tier} ===")
     print("> " + " ".join(cmd))

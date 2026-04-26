@@ -44,6 +44,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-int8", action="store_true")
     parser.add_argument("--representative-samples", type=int, default=200)
     parser.add_argument(
+        "--int8-eval-test-only",
+        action="store_true",
+        help="When set, skip int8 train/val accuracy evaluation and only run the "
+             "int8 test set. evaluate_tflite() runs sample-by-sample so the train "
+             "split (~62k samples) takes ~5 min per model; for sweep retrain we "
+             "only need int8 test accuracy.",
+    )
+    parser.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
@@ -255,10 +263,14 @@ def main() -> None:
             rep_samples=args.representative_samples,
         )
         report["int8_tflite_size_bytes"] = tflite_path.stat().st_size
-        print("Evaluating int8 TFLite on train/val/test …")
-        report["int8_train_accuracy"] = evaluate_tflite(tflite_path, datasets["train"])
-        report["int8_val_accuracy"] = evaluate_tflite(tflite_path, datasets["val"])
-        report["int8_test_accuracy"] = evaluate_tflite(tflite_path, datasets["test"])
+        if args.int8_eval_test_only:
+            print("Evaluating int8 TFLite on test only …")
+            report["int8_test_accuracy"] = evaluate_tflite(tflite_path, datasets["test"])
+        else:
+            print("Evaluating int8 TFLite on train/val/test …")
+            report["int8_train_accuracy"] = evaluate_tflite(tflite_path, datasets["train"])
+            report["int8_val_accuracy"] = evaluate_tflite(tflite_path, datasets["val"])
+            report["int8_test_accuracy"] = evaluate_tflite(tflite_path, datasets["test"])
 
     with (output_dir / "report.json").open("w") as report_file:
         json.dump(report, report_file, indent=2)
